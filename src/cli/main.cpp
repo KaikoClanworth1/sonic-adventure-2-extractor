@@ -22,6 +22,9 @@ static void usage() {
         "  sa2cli model     <file>            summarise the models in a file\n"
         "  sa2cli fbx       <file> <out.fbx> [n]  export model n (default 0,\n"
         "                                         -1 = every model merged)\n"
+        "  sa2cli stage     <stgXXD.rel> <out>    export a stage: FBX + textures\n"
+        "                                         + Unity shader + material JSON\n"
+        "  sa2cli set       <setXXXX_s.bin>       list placed objects\n"
         "  sa2cli regress   <game>            batch-test every parser on every file\n"
         "  sa2cli search    <game> <query>    search asset names\n",
         version());
@@ -172,6 +175,28 @@ static AssetEntry entry_for(const char* path) {
     return e;
 }
 
+// Merge several models into one, offsetting node indices so skeletons stay valid.
+static Model merge_models(const std::vector<Model>& models, const std::string& name) {
+    Model merged;
+    merged.name = name;
+    int base = 0;
+    for (const auto& m : models) {
+        for (auto n : m.nodes) {
+            if (n.parent >= 0) n.parent += base;
+            n.index += base;
+            merged.nodes.push_back(n);
+        }
+        for (auto p : m.parts) {
+            p.node_index += base;
+            for (auto& vn : p.vertex_node) vn += base;
+            merged.parts.push_back(std::move(p));
+        }
+        base = (int)merged.nodes.size();
+        if (merged.parts.size() > 200000) break;
+    }
+    return merged;
+}
+
 // Walk up from a file to the game root (the folder containing resource/gd_PC)
 // so stage/texture sibling lookups resolve, then scan it.
 static void scan_containing_game(const char* path, GameIndex& idx) {
@@ -248,23 +273,7 @@ static int cmd_fbx(const char* path, const char* out, int model_index) {
         subset = la.models;
     }
 
-    Model merged;
-    merged.name = fs::path(path).stem().string();
-    int node_base = 0;
-    for (auto& m : subset) {
-        for (auto n : m.nodes) {
-            if (n.parent >= 0) n.parent += node_base;
-            n.index += node_base;
-            merged.nodes.push_back(n);
-        }
-        for (auto p : m.parts) {
-            p.node_index += node_base;
-            for (auto& vn : p.vertex_node) vn += node_base;
-            merged.parts.push_back(std::move(p));
-        }
-        node_base = (int)merged.nodes.size();
-        if (merged.parts.size() > 6000) break;
-    }
+    Model merged = merge_models(subset, fs::path(path).stem().string());
     FbxExportOptions opts;
     std::string e2;
     if (!export_fbx(out, merged, la.textures, la.motions, opts, &e2)) {
@@ -275,6 +284,123 @@ static int cmd_fbx(const char* path, const char* out, int model_index) {
     printf("  models=%zu/%zu meshes=%zu nodes=%zu tris=%zu textures=%zu anims=%zu\n",
            subset.size(), la.models.size(), merged.parts.size(), merged.nodes.size(),
            merged.triangle_count(), la.textures.size(), la.motions.size());
+    return 0;
+}
+
+static int cmd_stage(const char* path, const char* outdir) {
+    GameIndex idx;
+    scan_containing_game(path, idx);
+    LoadedAsset la;
+    std::string err;
+    if (!load_asset(entry_for(path), idx, la, &err)) {
+        printf("failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (la.models.empty()) { printf("no stage geometry in %s\n", path); return 1; }
+    std::error_code ec;
+    fs::create_directories(outdir, ec);
+    std::string base = fs::path(path).stem().string();
+
+    // Merge the main landtable and its animated-scenery auxiliaries into one FBX.
+    Model merged = merge_models(la.models, base);
+    FbxExportOptions opts;
+    std::string e2;
+    std::string fbx = std::string(outdir) + "/" + base + ".fbx";
+    if (!export_fbx(fbx, merged, la.textures, la.motions, opts, &e2)) {
+        printf("FBX export failed: %s\n", e2.c_str());
+        return 1;
+    }
+    // Unity shader + material JSON
+    export_unity_materials(outdir, base, merged, la.textures, &e2);
+    // loose PNGs too
+    std::string texdir = std::string(outdir) + "/textures";
+    fs::create_directories(texdir, ec);
+    int nt = 0;
+    for (auto& img : la.textures) {
+        std::string nm = img.name.empty() ? ("tex_" + std::to_string(nt)) : img.name;
+        if (write_png(texdir + "/" + nm + ".png", img)) nt++;
+    }
+    // Object placement: find the matching SET file(s) and export a scene JSON a
+    // Unity importer can use to place objects. stg13D.rel -> set0013_s.bin.
+    // (Object id -> model mapping needs the community objdefs metadata, which we
+    // do not ship, so this records ids + transforms, not resolved models.)
+    int set_objs = 0;
+    if (base.rfind("stg", 0) == 0 && base.size() >= 5) {
+        std::string num = base.substr(3, base.size() - 4);  // "13" from stg13D
+        std::string dir = fs::path(path).parent_path().string();
+        for (const char* suf : {"_s.bin", "_u.bin", "_S.BIN", "_U.BIN"}) {
+            std::string sp = dir + "/set" + std::string(num.size() < 4 ? 4 - num.size() : 0, '0') +
+                             num + suf;
+            // normalise to 4-digit id
+            char idbuf[8];
+            snprintf(idbuf, sizeof idbuf, "%04d", atoi(num.c_str()));
+            sp = dir + "/set" + idbuf + suf;
+            std::error_code ec;
+            if (!fs::exists(sp, ec)) continue;
+            auto sd = read_file(sp);
+            std::vector<SetObject> objs;
+            if (!parse_set_file(sd.data(), sd.size(), objs)) continue;
+            std::string jp = std::string(outdir) + "/" +
+                             fs::path(sp).stem().string() + ".objects.json";
+            FILE* jf = nullptr;
+#ifdef _WIN32
+            fopen_s(&jf, jp.c_str(), "wb");
+#else
+            jf = fopen(jp.c_str(), "wb");
+#endif
+            if (jf) {
+                fprintf(jf, "{\n  \"set\": \"%s\",\n  \"count\": %zu,\n  \"objects\": [\n",
+                        fs::path(sp).filename().string().c_str(), objs.size());
+                for (size_t i = 0; i < objs.size(); i++) {
+                    const auto& o = objs[i];
+                    fprintf(jf,
+                        "    {\"id\": %d, \"clip\": %d, "
+                        "\"pos\": [%.3f, %.3f, %.3f], "
+                        "\"rot_bams\": [%d, %d, %d], "
+                        "\"scale\": [%.3f, %.3f, %.3f]}%s\n",
+                        o.object_id(), o.clip_level(), o.pos[0], o.pos[1], o.pos[2],
+                        o.rot[0], o.rot[1], o.rot[2], o.scale[0], o.scale[1], o.scale[2],
+                        (i + 1 < objs.size()) ? "," : "");
+                }
+                fprintf(jf, "  ]\n}\n");
+                fclose(jf);
+                set_objs += (int)objs.size();
+            }
+        }
+    }
+
+    printf("stage '%s' exported to %s\n", base.c_str(), outdir);
+    size_t tris = 0, meshes = 0;
+    for (auto& m : la.models) { tris += m.triangle_count(); meshes += m.parts.size(); }
+    printf("  %zu landtable(s), %zu meshes, %zu tris\n", la.models.size(), meshes, tris);
+    for (auto& m : la.models)
+        printf("     - %-16s %zu tris\n", m.name.c_str(), m.triangle_count());
+    printf("  %d textures, SA2Stage.shader, %s.materials.json\n", nt, base.c_str());
+    if (set_objs) printf("  %d placed objects (scene JSON)\n", set_objs);
+    return 0;
+}
+
+static int cmd_set(const char* path) {
+    auto data = read_file(path);
+    if (data.empty()) { printf("cannot read %s\n", path); return 1; }
+    std::vector<SetObject> objs;
+    if (!parse_set_file(data.data(), data.size(), objs)) {
+        printf("not a valid SET file (or unexpected size)\n");
+        return 1;
+    }
+    printf("%s: %zu placed objects\n", fs::path(path).filename().string().c_str(),
+           objs.size());
+    // histogram of object ids
+    std::map<int, int> hist;
+    for (auto& o : objs) hist[o.object_id()]++;
+    printf("  %zu distinct object ids\n", hist.size());
+    int shown = 0;
+    for (auto& o : objs) {
+        if (shown++ >= 20) break;
+        printf("    id=%-4d clip=%d pos=(%.1f %.1f %.1f) rot=(%d %d %d)\n",
+               o.object_id(), o.clip_level(), o.pos[0], o.pos[1], o.pos[2],
+               o.rot[0], o.rot[1], o.rot[2]);
+    }
     return 0;
 }
 
@@ -423,6 +549,8 @@ int main(int argc, char** argv) {
     if (cmd == "model" && argc >= 3)    return cmd_model(argv[2]);
     if (cmd == "fbx" && argc >= 4)
         return cmd_fbx(argv[2], argv[3], argc >= 5 ? atoi(argv[4]) : 0);
+    if (cmd == "stage" && argc >= 4)    return cmd_stage(argv[2], argv[3]);
+    if (cmd == "set" && argc >= 3)      return cmd_set(argv[2]);
     if (cmd == "regress" && argc >= 3)  return cmd_regress(argv[2]);
     if (cmd == "search" && argc >= 4)   return cmd_search(argv[2], argv[3]);
     usage();

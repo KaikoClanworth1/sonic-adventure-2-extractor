@@ -86,8 +86,12 @@ struct MeshPart {
     int texture_id = -1;
     int node_index = 0;
     bool double_sided = false;
-    bool use_alpha = false;
-    uint32_t diffuse = 0xFFFFFFFFu;
+    bool use_alpha = false;         // alpha blending on
+    bool ignore_light = false;      // unlit / vertex-colour only
+    bool env_map = false;           // spherical environment mapping
+    int blend_src = 4;              // GX blend factor (4 = SrcAlpha)
+    int blend_dst = 5;              // GX blend factor (5 = InvSrcAlpha)
+    uint32_t diffuse = 0xFFFFFFFFu; // ARGB material colour
 };
 
 struct Model {
@@ -186,6 +190,34 @@ std::vector<LandTableInfo> find_landtables(const NinjaBlob& blob);
 // Builds every visual COL of a landtable into one Model (GC geometry, world
 // space). Collision-only COLs are skipped.
 bool build_landtable(const NinjaBlob& blob, const LandTableInfo& lt, Model& out);
+
+// ---------------------------------------------------------------- SET / objects
+// One placed object from a SETxxxx_?.BIN file.
+struct SetObject {
+    uint16_t id = 0;            // object id (low 12 bits) + clip level (high 4)
+    int16_t rot[3]{0, 0, 0};   // BAMS
+    float pos[3]{0, 0, 0};
+    float scale[3]{1, 1, 1};   // often repurposed as per-object parameters
+    int object_id() const { return id & 0x0FFF; }
+    int clip_level() const { return (id >> 12) & 0x0F; }
+};
+
+// Parses a SET placement file: u32 count (BE), 0x1C pad, then count*0x20 records.
+bool parse_set_file(const uint8_t* d, size_t n, std::vector<SetObject>& out);
+
+// ---------------------------------------------------------------- Unity / VRChat
+// Writes, into `dir`:
+//   <base>.materials.json  - one entry per unique material (texture, unlit,
+//                            env-map, blend, double-sided, diffuse)
+//   SA2Stage.shader        - a Unity shader reproducing SA2 stage shading,
+//                            authored to be VRChat-safe (no GrabPass)
+//   apply_materials.py      - a Blender/Unity-agnostic helper that maps the
+//                            JSON onto imported meshes by material name
+// The FBX/PNG exports already carry the geometry and textures; this adds the
+// material intent Unity needs. Returns false on I/O error.
+bool export_unity_materials(const std::string& dir, const std::string& base,
+                            const Model& model, const std::vector<Image>& textures,
+                            std::string* error = nullptr);
 
 // Event files are big-endian and hold absolute GameCube RAM pointers. Retail
 // cutscenes load at 0x8125FE60; a few (e.g. e0350) are the older "dcgc" layout

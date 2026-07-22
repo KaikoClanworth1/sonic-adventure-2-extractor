@@ -203,7 +203,7 @@ static void scene_from_asset(const LoadedAsset& la, Scene& sc,
 
 // ------------------------------------------------------------------ camera
 struct Camera {
-    float yaw = 0.7f, pitch = 0.25f, dist = 3.0f;
+    float yaw = 0.7f, pitch = 0.35f, dist = 2.2f;
 };
 
 static void set_perspective(float fovy, float aspect, float zn, float zf) {

@@ -234,13 +234,106 @@ Motions bind to nodes by depth-first traversal index, skipping nodes flagged
 
 ---
 
-## 8. What is not implemented
+## 8. Stage geometry: GameCube REL + LandTables + GC "Ginja" models
 
-* **Stage geometry** lives in `stgXXD.rel` — genuine GameCube REL modules
-  (big-endian PowerPC relocatables, module ID at 0x00). Extracting landtables
-  from these needs section relocation processing, which this project does not do.
-* **Object/stage models compiled into `sonic2app.exe`** use the GC "Ginja" format
-  (little-endian structs, big-endian GX display lists) at absolute VAs with
-  ImageBase 0x00400000. Also not implemented.
+Stages live in `stgXXD.rel` — genuine GameCube REL modules, big-endian.
+
+### REL relocation
+
+```
+0x00 u32 moduleId    0x0C u32 numSections   0x10 u32 sectionInfoOffset
+0x1C u32 version     0x24 u32 relOffset     0x28 u32 impOffset  0x2C u32 impSize
+section info: numSections x { u32 offset (low 2 bits = flags), u32 size }
+imp table:    impSize/8 x { u32 moduleId, u32 relStreamOffset }
+reloc entry (8 bytes): u16 skip, u8 type, u8 section, u32 addend
+```
+
+Apply only the sub-stream whose `moduleId == header moduleId` (the other targets
+the DOL). Relocation is a running cursor: `R_DOLPHIN_SECTION (202)` resets the
+cursor to a section start, `R_DOLPHIN_NOP (201)` advances it, `R_DOLPHIN_END (203)`
+ends the stream. For `R_PPC_ADDR32 (1)`, write `sectionOffset + addend` at the
+cursor. **A REL section's stored offset already IS its file offset**, so after
+relocating in place every intra-module pointer is a plain file offset (base 0) —
+no repacking needed. The 16-bit/branch relocations only matter for code we never
+run.
+
+**Result: 64/64 stage RELs relocate and yield a LandTable (2 have none, as
+expected), ~1.0M triangles total.**
+
+### LandTable (SA2/SA2B) — 0x20 bytes
+
+```
+0x00 i16 colCount        0x02 i16 visibleModelCount   0x0C f32 clippingDistance
+0x10 u32 COL array       0x18 u32 textureName (cstr)  0x1C u32 texlist
+```
+
+`textureName` is e.g. `"landtx13"` → `LANDTX13.PRS` (a GVM). A stage also carries
+auxiliary landtables for animated scenery, named by suffix: `_uv` (UV scroll),
+`_ani`, `_x`. Each is extracted as a separate model.
+
+### COL — 0x20 bytes
+
+```
+0x00 f32[3] centre   0x0C f32 radius   0x10 u32 NJS_OBJECT
+0x18 u32 blockBits   0x1C i32 surfaceFlags
+```
+
+COL index `< visibleModelCount` is a visual model; `>= visibleModelCount` is a
+collision-only Basic model (skipped by the viewer). Most SA2B stages use GC
+"Ginja" visual models; a few (e.g. City Hall) ship Dreamcast Chunk models inside
+the REL, so the loader detects the format per landtable by sampling.
+
+**Locating the LandTable without hardcoded addresses:** signature-scan for the
+struct, then require a share of its COLs to resolve to real models. That last
+check is what rejects the garbage "landtables" that otherwise appear inside the
+relocation/import tables (an in-place relocated REL contains far more non-geometry
+bytes than a repacked section image would).
+
+### GC "Ginja" model
+
+```
+GCAttach (0x24): u32 vertexSets, u32 skin(=0 in SA2), u32 opaqueMeshes,
+                 u32 translucentMeshes, u16 opaqueCount, u16 transCount,
+                 f32[3] centre, f32 radius
+GCVertexSet (16, ends at attribute 0xFF/0): u8 attribute (1=Pos,2=Normal,
+                 3=Color0,5=Tex0), u8 stride, u16 count,
+                 u32 structure (structType=&0xF, dataType=(>>4)&0xF),
+                 u32 dataPtr, u32 dataLen
+GCMesh (16): u32 paramPtr, i32 paramCount, u32 primPtr, u32 primSize
+GCParameter (8): u8 type (0=VtxAttrFmt,1=IndexFlags,2=Lighting,4=BlendAlpha,
+                 5=Colour,8=Texture,10=TexCoordGen), u32 data
+```
+
+Positions/normals are float32 XYZ; colours RGBA8; UVs are int16/256. The display
+list is **big-endian GX** everywhere: `u8 opcode` (0x90 triangles, 0x98 strip,
+0xA0 fan), `u16 count`, then per-vertex indices whose presence and width come from
+the **sticky** IndexAttributeFlags (2 bits per GX slot; the value persists across
+meshes until another parameter changes it).
+
+## 9. SET object placement
+
+`setXXXX_s.bin` / `_u.bin` (and `_2p_`, `_hd_` variants), big-endian:
+
+```
+0x00 u32 count, 0x04 u8[0x1C] pad, then count x SETEntry (0x20):
+  0x00 u16 id (low 12 bits = object id, high 4 = clip level)
+  0x02 i16[3] rotation (BAMS)   0x08 f32[3] position   0x14 f32[3] scale
+```
+
+**Result: parses byte-exact on all 240 SET files** (the size equation
+`0x20 + count*0x20 == filesize` holds). The object id → model mapping is *not* in
+the file — it indexes a per-stage object list that SA Tools carries as curated
+`objdefs` metadata, so the tool exports placement (id + transform) as a scene
+JSON rather than resolving models.
+
+## 10. What is not implemented
+
+* **Object/enemy models compiled into `sonic2app.exe`** (GC "Ginja" at absolute
+  VAs, ImageBase 0x00400000) — the placement side is done, the model resolution
+  is not.
+* **Stage motion** (UV scroll rates, moving-platform paths) is compiled game code,
+  not replayable keyframe data.
+* **In-game particle systems** are hardcoded; only effect textures (extractable
+  via the texture path) and `sp_info` appearance parameters are data.
 * Audio (`.adx`, `.csb`), video (`.sfd`, `.m1v`) and message tables are indexed
   and classified but not decoded.

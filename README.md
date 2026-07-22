@@ -17,9 +17,16 @@ verified by a batch regression that runs every parser over every shipped file.
 * **Global search** across every filename.
 * **Decompresses PRS** and reads **PAK** archives.
 * **Decodes GVR/GVM textures** (GameCube CMPR, RGB5A3, indexed) plus DDS and PNG.
-* **Renders models** in a textured, lit 3D viewport (orbit + zoom).
+* **Extracts whole stages** — GameCube REL relocation, GC "Ginja" geometry and
+  LandTables, including the animated-scenery `_uv`/`_ani`/`_x` sub-tables and the
+  matching object placement (SET files).
+* **Renders models and stages** in a textured, lit 3D viewport (orbit + zoom),
+  with a per-model / per-landtable selector.
 * **Exports to binary FBX** with meshes, UVs, materials, textures, the node
   skeleton, skin clusters and every animation as its own take.
+* **Exports a Unity/VRChat material set** — a `SA2Stage.shader` plus a
+  `.materials.json` capturing each material's unlit / env-map / blend / diffuse
+  state, and object placement as a scene JSON.
 * **Exports textures** as PNG.
 * Persisted game-folder setting and a **UI scale slider** for high-DPI displays.
 
@@ -35,14 +42,21 @@ verified by a batch regression that runs every parser over every shipped file.
   character models   : 23 ok, 0 failed
   character motions  : 17 ok, 0 failed (817 motions, 345380 keys)
   event scenes       : 67 ok, 0 failed
+  stage geometry     : 64 ok, 0 failed, 2 without landtable (999559 tris)
   geometry           : 1051417 vertices, 1118404 triangles
   suspect bounds     : 0
   RESULT             : ALL PASS
 ```
 
+Every stage FBX is round-tripped through headless Blender: City Escape
+(124,787 tris, 126 textures, 2,376 bones) and Crazy Gadget (three landtables:
+main + `_uv` scroll + `_x` animated) both import clean.
+
+![Stage](docs/stage.png)
+
 ## Getting it
 
-Grab `sa2-extractor-v1.0.0-win64.zip` from
+Grab the latest `sa2-extractor-*-win64.zip` from
 [Releases](../../releases) — a single statically linked `.exe`, no vcredist
 required. Run `sa2viewer.exe`, click **Browse...** and point it at your
 Sonic Adventure 2 folder (e.g.
@@ -51,14 +65,21 @@ Sonic Adventure 2 folder (e.g.
 ## Command line
 
 ```
-sa2cli list      <game>            list and classify every asset
-sa2cli search    <game> <query>    search asset names
-sa2cli info      <file>            identify one file
-sa2cli extract   <file> <outdir>   extract textures / PAK contents
-sa2cli model     <file>            summarise the models in a file
-sa2cli fbx       <file> <out.fbx>  export models + skeleton + anims to FBX
-sa2cli regress   <game>            batch-test every parser on every file
+sa2cli list      <game>              list and classify every asset
+sa2cli search    <game> <query>      search asset names
+sa2cli info      <file>              identify one file
+sa2cli extract   <file> <outdir>     extract textures / PAK contents
+sa2cli model     <file>              summarise the models in a file
+sa2cli fbx       <file> <out.fbx> [n] export model n (-1 = all merged)
+sa2cli stage     <stgXXD.rel> <dir>  export a stage: FBX + textures +
+                                     Unity shader + material JSON + placement
+sa2cli set       <setXXXX_s.bin>     list placed objects
+sa2cli regress   <game>              batch-test every parser on every file
 ```
+
+`sa2cli stage stg13D.rel out/` produces, in `out/`: `stg13D.fbx` (all
+landtables), the textures, `SA2Stage.shader`, `stg13D.materials.json`,
+`apply_materials.py`, and `set0013_*.objects.json` (object placement).
 
 ## Building
 
@@ -78,6 +99,8 @@ clean machine.
 |---|---|
 | Playable character models | `resource/gd_PC/*mdl.prs` (23 files) |
 | Character animations | `resource/gd_PC/*mtn.prs` (17 files, 817 motions) |
+| Stages | `resource/gd_PC/stgXXD.rel` (64 with geometry) |
+| Object placement | `resource/gd_PC/setXXXX_[su].bin` |
 | Cutscene scenes | `resource/gd_PC/event/eNNNN.prs` (67 files) |
 | Textures | `resource/gd_PC/**.prs` → GVM, and `*.pak` → DDS/PNG |
 
@@ -94,29 +117,42 @@ out of `knuckmdl.prs`, imported and rendered by Blender with no manual fixing:
 Across a random sample of exports: **6/6 pass**, e.g. `milesmdl` → 18/18 meshes with
 UVs and vertex groups, 60 bones, 0 dangling groups, 30 actions, 83,910 keyframes.
 
-## Known limitations
+## Stages, animations, NPCs and particles — what's honest
 
-* **Stage geometry is not supported.** Level landtables live in `stgXXD.rel`,
-  which are genuine GameCube REL modules; pulling models out needs section
-  relocation processing that this tool does not implement.
-* **Cutscene animations are not exported.** Event geometry loads fine, but the
-  motions live in a separate `eNNNNmotion.bin` stream that is not parsed, so
-  cutscene FBX files contain 0 actions.
-* **Animations are matched by exact filename.** `sonicmdl.prs` picks up
-  `sonicmtn.prs`, but variants like `bknuckmdl.prs` or `twalk1mdl.prs` have no
-  same-named `*mtn.prs`, so they export with no actions. Export the base
-  character to get the animations.
-* A model container holds many independent models all rooted at the origin, so
-  `sa2cli fbx` exports model 0 by default. Pass an index, or `-1` to merge
-  everything (they will overlap).
-* **Object models compiled into `sonic2app.exe`** use the GC "Ginja" format
-  (little-endian structs, big-endian GX display lists) at absolute virtual
-  addresses. Not implemented — this tool handles the Ninja **Chunk** models,
-  which is what every model in `gd_PC` actually uses.
-* Skinning in SA2 is rigid: each mesh is bound to the node that owns it. That
-  is how the game itself works (Dreamcast-era segmented characters), and it is
-  what the FBX skin clusters reproduce. Weighted chunk vertex types (32/33) are
-  parsed but are essentially unused by the retail data.
+The stage viewer covers the parts of a stage that are genuinely stored as data.
+A few things about SA2 are worth stating plainly, because they are compiled into
+the game rather than sitting in a file:
+
+* **Stage geometry: fully supported.** 64 stage RELs extract, textured. Both the
+  GC "Ginja" and the Dreamcast Chunk landtable variants are handled.
+* **Stage animation is only partly data-driven.** The animated scenery *geometry*
+  ships as auxiliary landtables (`_uv` scroll, `_ani`, `_x`) and is extracted as
+  separate models. The *motion* that drives it (UV scroll rates, moving platforms)
+  is bound by compiled game code and is not stored as replayable keyframes, so it
+  is not reconstructed.
+* **Object / NPC placement: supported. Model *mapping* is not.** Every `setXXXX`
+  file is parsed and exported as a scene JSON (id, position, rotation, scale).
+  Turning an object id into a model needs the community `objdefs` metadata (an
+  ID→model table maintained by SA Tools), which this project does not bundle;
+  enemy/NPC models themselves live inside `sonic2app.exe`, not in `gd_PC`.
+* **Highest texture resolution is already reached.** The PC port did **not**
+  upscale textures — its DDS replacements are the same resolution as the GVR
+  originals. The tool prefers the PC DDS PAK when one exists (better alpha) and
+  otherwise decodes the native GVR, which is the maximum available.
+* **Particles are hardcoded.** SA2's in-game particle systems live in
+  `sonic2app.exe`; only the effect *textures* are extractable (via the normal
+  texture path) and only appearance parameters (`sp_info`) are data. Cutscene
+  particle definitions in the event files are the one data-driven exception.
+
+Other limits:
+
+* **Cutscene animations are not exported** — the motions live in a separate
+  `eNNNNmotion.bin` stream that is not parsed, so cutscene FBX files have 0 takes.
+* **Character animations are matched by exact filename** — `sonicmdl.prs` picks up
+  `sonicmtn.prs`, but variants like `bknuckmdl.prs` have no same-named `*mtn.prs`
+  and export with no actions.
+* **Character skinning is rigid** — each mesh is bound to the node that owns it,
+  which is how the game itself works (Dreamcast-era segmented characters).
 * Audio, video and message tables are indexed and classified but not decoded.
 
 ## Format notes

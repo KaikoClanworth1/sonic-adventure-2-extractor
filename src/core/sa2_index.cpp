@@ -180,6 +180,67 @@ std::vector<int> GameIndex::search(const std::string& query, int limit) const {
     return out;
 }
 
+// Read a PAK's <name>.inf index to recover the texlist order. Each record is
+// 0x3C bytes and begins with a NUL-padded texture name.
+static std::vector<std::string> read_inf_order(const uint8_t* d, size_t n) {
+    std::vector<std::string> order;
+    for (size_t o = 0; o + 0x3C <= n; o += 0x3C) {
+        size_t len = 0;
+        while (len < 0x1C && d[o + len]) len++;
+        order.emplace_back((const char*)d + o, len);
+    }
+    return order;
+}
+
+// Prefer the PC DDS replacement archive (PRS/<base>.pak) over the GVR/GVM when
+// it exists. Same spatial resolution, but it is the texture the PC game ships
+// (DXT5, better alpha) and is loaded in texlist order so texture ids still map.
+// Returns true if a PAK was found and used.
+static bool load_hires_pak(const std::string& base, const std::string& game_root,
+                           std::vector<Image>& out) {
+    if (base.empty() || game_root.empty()) return false;
+    std::string pak = game_root + "/resource/gd_PC/PRS/" + base + ".pak";
+    std::error_code ec;
+    if (!fs::exists(pak, ec)) return false;
+    auto data = read_file(pak);
+    PakArchive arc;
+    if (!arc.parse(data.data(), data.size())) return false;
+
+    // find the .inf to get texture order; fall back to entry order
+    std::vector<std::string> order;
+    std::map<std::string, const PakEntry*> by_name;
+    for (const auto& e : arc.entries) {
+        std::string leaf = fs::path(e.name).stem().string();
+        std::string el = lower(fs::path(e.name).extension().string());
+        if (el == ".inf") {
+            order = read_inf_order(data.data() + e.offset, e.length);
+        } else if (el == ".dds" || el == ".png") {
+            by_name[lower(leaf)] = &e;
+        }
+    }
+    auto decode = [&](const PakEntry* e) {
+        const uint8_t* p = data.data() + e->offset;
+        Image img;
+        bool ok = false;
+        if (e->length >= 4 && memcmp(p, "DDS ", 4) == 0) ok = dds_decode(p, e->length, img);
+        else if (e->length >= 8 && p[0] == 0x89 && p[1] == 'P') ok = png_decode(p, e->length, img);
+        if (ok) { img.name = fs::path(e->name).stem().string(); out.push_back(std::move(img)); }
+    };
+    if (!order.empty()) {
+        for (const auto& nm : order) {
+            auto it = by_name.find(lower(nm));
+            if (it != by_name.end()) decode(it->second);
+        }
+    }
+    if (out.empty()) {   // no usable .inf: fall back to entry order
+        for (const auto& e : arc.entries) {
+            std::string el = lower(fs::path(e.name).extension().string());
+            if (el == ".dds" || el == ".png") decode(&e);
+        }
+    }
+    return !out.empty();
+}
+
 // ---------------------------------------------------------------- textures
 bool load_textures(const std::string& path, std::vector<Image>& out) {
     auto data = load_file(path);
@@ -332,24 +393,36 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         NinjaBlob blob(std::move(img), 0, true);
         auto lts = find_landtables(blob);
         if (lts.empty()) return fail("no landtable in this REL");
-        Model m;
-        if (!build_landtable(blob, lts[0], m))
-            return fail("landtable produced no geometry");
-        m.name = "stage";
-        out.models.push_back(std::move(m));
-        // landtx13 -> LANDTX13.PRS (case-insensitive, sits in gd_PC root)
+        // Build every landtable as its own model: the main table plus the
+        // animated-scenery auxiliaries (_uv scroll, _ani, _x). This is the
+        // extractable part of "stage animations" - the animated geometry itself;
+        // the motion binding is compiled into the game and not data-driven.
+        std::string main_tex = lts[0].texture_name;
+        for (size_t i = 0; i < lts.size(); i++) {
+            Model m;
+            if (!build_landtable(blob, lts[i], m)) continue;
+            m.name = lts[i].texture_name.empty()
+                         ? ("landtable_" + std::to_string(i))
+                         : lts[i].texture_name;
+            out.models.push_back(std::move(m));
+        }
+        if (out.models.empty()) return fail("landtable produced no geometry");
+        lts[0].texture_name = main_tex;
+        // Textures: prefer the PC DDS PAK (highest-quality shipped), else the
+        // GVR archive. landtx13 -> PRS/landtx13.pak or LANDTX13.PRS.
         if (!lts[0].texture_name.empty() && !idx.root().empty()) {
-            std::string tp = idx.root() + "/resource/gd_PC/" +
-                             lts[0].texture_name + ".prs";
-            std::error_code ec;
-            if (!fs::exists(tp, ec)) {
-                // fall back to a case-insensitive search in the index
-                for (const auto& ae : idx.entries()) {
-                    std::string nl = lower(ae.name);
-                    if (nl == lower(lts[0].texture_name) + ".prs") { tp = ae.path; break; }
+            if (!load_hires_pak(lts[0].texture_name, idx.root(), out.textures)) {
+                std::string tp = idx.root() + "/resource/gd_PC/" +
+                                 lts[0].texture_name + ".prs";
+                std::error_code ec;
+                if (!fs::exists(tp, ec)) {
+                    for (const auto& ae : idx.entries()) {
+                        std::string nl = lower(ae.name);
+                        if (nl == lower(lts[0].texture_name) + ".prs") { tp = ae.path; break; }
+                    }
                 }
+                load_textures(tp, out.textures);
             }
-            load_textures(tp, out.textures);
         }
         return true;
     }

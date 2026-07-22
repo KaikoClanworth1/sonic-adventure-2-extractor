@@ -331,6 +331,10 @@ static void gc_attach_to_parts(const NinjaBlob& b, uint32_t attach_ptr,
         part.node_index = node_index;
         part.double_sided = d.double_sided;
         part.use_alpha = d.use_alpha;
+        part.ignore_light = d.ignore_light;
+        part.env_map = d.env_map;
+        part.blend_src = d.blend_src;
+        part.blend_dst = d.blend_dst;
         part.diffuse = d.ambient;
         std::unordered_map<uint64_t, uint32_t> remap;
         auto add = [&](const Corner& c) -> uint32_t {
@@ -454,7 +458,51 @@ std::vector<LandTableInfo> find_landtables(const NinjaBlob& b) {
               [](const LandTableInfo& a, const LandTableInfo& c) {
                   return a.col_count > c.col_count;
               });
-    return out;
+    // Distinct landtables have distinct COL arrays; drop duplicates that alias
+    // the same array (keeping the first, i.e. the largest).
+    std::vector<LandTableInfo> uniq;
+    std::set<uint32_t> seen;
+    for (auto& lt : out) {
+        if (seen.insert(lt.col_ptr).second) uniq.push_back(lt);
+    }
+    return uniq;
+}
+
+// ---------------------------------------------------------------- SET files
+bool parse_set_file(const uint8_t* d, size_t n, std::vector<SetObject>& out) {
+    if (!d || n < 0x20) return false;
+    uint32_t count = be32(d, 0);
+    // SET files are big-endian; sanity-check the record count against the size.
+    if ((size_t)0x20 + (size_t)count * 0x20 != n) {
+        // some tools store little-endian; try that before giving up
+        uint32_t le = (uint32_t)d[0] | ((uint32_t)d[1] << 8) |
+                      ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+        if ((size_t)0x20 + (size_t)le * 0x20 == n) count = le;
+        else return false;
+    }
+    if (count > 100000) return false;
+    auto f32be = [&](size_t o) {
+        uint32_t v = be32(d, o);
+        float f; memcpy(&f, &v, 4); return f;
+    };
+    auto s16be = [&](size_t o) { return (int16_t)((d[o] << 8) | d[o + 1]); };
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; i++) {
+        size_t o = 0x20 + (size_t)i * 0x20;
+        SetObject s;
+        s.id = (uint16_t)((d[o] << 8) | d[o + 1]);
+        s.rot[0] = s16be(o + 2);
+        s.rot[1] = s16be(o + 4);
+        s.rot[2] = s16be(o + 6);
+        s.pos[0] = f32be(o + 8);
+        s.pos[1] = f32be(o + 12);
+        s.pos[2] = f32be(o + 16);
+        s.scale[0] = f32be(o + 20);
+        s.scale[1] = f32be(o + 24);
+        s.scale[2] = f32be(o + 28);
+        out.push_back(s);
+    }
+    return true;
 }
 
 bool build_landtable(const NinjaBlob& b, const LandTableInfo& lt, Model& out) {
