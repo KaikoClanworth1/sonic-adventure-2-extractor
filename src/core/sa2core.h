@@ -147,11 +147,45 @@ public:
     // Structural scan for NJS_OBJECT roots that own a real attach.
     std::vector<uint32_t> find_model_roots() const;
 
+    // --- GC "Ginja" models (stage geometry) ---
+    // True when `ptr` points at a GCAttach (0x24 bytes, skin==0, a Position
+    // vertex set, sane mesh counts and bounding radius).
+    bool valid_gc_attach(uint32_t ptr) const;
+    // Walk a node tree whose attaches are GC attaches; append model-space parts.
+    bool build_gc_model(uint32_t root, Model& out) const;
+
+    const std::vector<uint8_t>& raw() const { return data_; }
+    uint32_t base() const { return base_; }
+    bool big_endian() const { return be_; }
+
 private:
     std::vector<uint8_t> data_;
     uint32_t base_;
     bool be_;
 };
+
+// ---------------------------------------------------------------- REL / stages
+// Applies a GameCube REL module's self-module ADDR32 relocations in place, so
+// intra-module pointers become direct file offsets (pointer base = 0). Returns
+// false if the buffer is not a v1/v2/v3 REL. `out` is the relocated image.
+bool rel_relocate(const uint8_t* data, size_t n, std::vector<uint8_t>& out);
+
+// A LandTable found inside a relocated stage REL.
+struct LandTableInfo {
+    uint32_t addr = 0;        // pointer to the LandTable struct
+    int col_count = 0;
+    int visible_count = 0;    // COL index < this => visual, >= this => collision
+    float clip = 0.0f;
+    uint32_t col_ptr = 0;
+    std::string texture_name;  // e.g. "landtx13" -> LANDTX13.PRS
+};
+
+// Signature-scans a relocated REL image for LandTables, largest first.
+std::vector<LandTableInfo> find_landtables(const NinjaBlob& blob);
+
+// Builds every visual COL of a landtable into one Model (GC geometry, world
+// space). Collision-only COLs are skipped.
+bool build_landtable(const NinjaBlob& blob, const LandTableInfo& lt, Model& out);
 
 // Event files are big-endian and hold absolute GameCube RAM pointers. Retail
 // cutscenes load at 0x8125FE60; a few (e.g. e0350) are the older "dcgc" layout
@@ -167,7 +201,8 @@ std::vector<MtnEntry> read_mtn_table(const uint8_t* d, size_t n);
 // ---------------------------------------------------------------- game index
 enum class AssetKind {
     Unknown, TextureArchive, CharacterModel, CharacterMotion, EventScene,
-    EventTexture, EventMotion, PakArchive, Texture, Audio, Video, Message, Level
+    EventTexture, EventMotion, PakArchive, Texture, Audio, Video, Message, Level,
+    Stage, SetPlacement
 };
 const char* kind_name(AssetKind k);
 

@@ -25,6 +25,8 @@ const char* kind_name(AssetKind k) {
         case AssetKind::Video:           return "Video";
         case AssetKind::Message:         return "Text/messages";
         case AssetKind::Level:           return "Level module";
+        case AssetKind::Stage:           return "Stage geometry";
+        case AssetKind::SetPlacement:    return "Object placement";
         default:                         return "Data";
     }
 }
@@ -71,6 +73,15 @@ std::vector<uint8_t> load_file(const std::string& path) {
 
 static AssetKind classify(const std::string& name_l, const std::string& rel_l) {
     if (ends_with(name_l, ".pak")) return AssetKind::PakArchive;
+    // Stage geometry lives in stgXXD.rel; boss arenas in Boss_*D.rel. Other RELs
+    // (Chao, advertise, title...) are modules with no landtable.
+    if (ends_with(name_l, ".rel")) {
+        if (name_l.rfind("stg", 0) == 0 || name_l.find("boss") != std::string::npos)
+            return AssetKind::Stage;
+        return AssetKind::Level;
+    }
+    if (name_l.rfind("set", 0) == 0 && ends_with(name_l, ".bin"))
+        return AssetKind::SetPlacement;
     if (ends_with(name_l, ".gvr") || ends_with(name_l, ".dds") ||
         ends_with(name_l, ".png") || ends_with(name_l, ".gvp") ||
         ends_with(name_l, ".plt"))
@@ -312,6 +323,35 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         std::string tex = sibling(e.path, ".prs", "texture.prs");
         if (!tex.empty()) load_textures(tex, out.textures);
         return !out.models.empty() ? true : fail("no models found in event");
+    }
+
+    if (e.kind == AssetKind::Stage) {
+        std::vector<uint8_t> img;
+        if (!rel_relocate(data.data(), data.size(), img))
+            return fail("not a REL module");
+        NinjaBlob blob(std::move(img), 0, true);
+        auto lts = find_landtables(blob);
+        if (lts.empty()) return fail("no landtable in this REL");
+        Model m;
+        if (!build_landtable(blob, lts[0], m))
+            return fail("landtable produced no geometry");
+        m.name = "stage";
+        out.models.push_back(std::move(m));
+        // landtx13 -> LANDTX13.PRS (case-insensitive, sits in gd_PC root)
+        if (!lts[0].texture_name.empty() && !idx.root().empty()) {
+            std::string tp = idx.root() + "/resource/gd_PC/" +
+                             lts[0].texture_name + ".prs";
+            std::error_code ec;
+            if (!fs::exists(tp, ec)) {
+                // fall back to a case-insensitive search in the index
+                for (const auto& ae : idx.entries()) {
+                    std::string nl = lower(ae.name);
+                    if (nl == lower(lts[0].texture_name) + ".prs") { tp = ae.path; break; }
+                }
+            }
+            load_textures(tp, out.textures);
+        }
+        return true;
     }
 
     // Unknown: try every interpretation we have.

@@ -62,7 +62,10 @@ def validate(path):
             uv = me.uv_layers[0].data
             for i in range(0, len(uv), max(1, len(uv) // 200)):
                 u, v = uv[i].uv
-                if not (math.isfinite(u) and math.isfinite(v)) or abs(u) > 64 or abs(v) > 64:
+                # Tiled stage geometry legitimately uses large UVs (a long road
+                # with a repeating texture), so only non-finite / absurd values
+                # indicate a real export bug.
+                if not (math.isfinite(u) and math.isfinite(v)) or abs(u) > 1e5 or abs(v) > 1e5:
                     uv_range_bad += 1
                     break
         if o.vertex_groups:

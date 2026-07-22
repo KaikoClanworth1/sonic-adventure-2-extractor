@@ -159,6 +159,7 @@ static AssetEntry entry_for(const char* path) {
     };
     if (ends("mdl.prs")) e.kind = AssetKind::CharacterModel;
     else if (ends("mtn.prs")) e.kind = AssetKind::CharacterMotion;
+    else if (ends(".rel")) e.kind = AssetKind::Stage;
     else if (ends(".pak")) e.kind = AssetKind::PakArchive;
     else if (ends(".gvr") || ends(".dds") || ends(".png")) e.kind = AssetKind::Texture;
     else if (rl.find("event") != std::string::npos && nl.size() > 5 &&
@@ -171,8 +172,21 @@ static AssetEntry entry_for(const char* path) {
     return e;
 }
 
+// Walk up from a file to the game root (the folder containing resource/gd_PC)
+// so stage/texture sibling lookups resolve, then scan it.
+static void scan_containing_game(const char* path, GameIndex& idx) {
+    fs::path p(path);
+    for (int up = 0; up < 8 && p.has_parent_path(); up++) {
+        p = p.parent_path();
+        std::error_code ec;
+        if (fs::exists(p / "resource" / "gd_PC", ec)) { idx.scan(p.string()); return; }
+        if (p.filename() == "gd_PC") { idx.scan(p.parent_path().parent_path().string()); return; }
+    }
+}
+
 static int cmd_model(const char* path) {
     GameIndex idx;
+    scan_containing_game(path, idx);
     LoadedAsset la;
     std::string err;
     if (!load_asset(entry_for(path), idx, la, &err)) {
@@ -210,6 +224,7 @@ static int cmd_model(const char* path) {
 
 static int cmd_fbx(const char* path, const char* out, int model_index) {
     GameIndex idx;
+    scan_containing_game(path, idx);
     LoadedAsset la;
     std::string err;
     if (!load_asset(entry_for(path), idx, la, &err)) {
@@ -273,7 +288,8 @@ static int cmd_regress(const char* game) {
     int gvm_ok = 0, gvm_fail = 0;
     long long tex_total = 0;
     int mdl_ok = 0, mdl_fail = 0, mtn_ok = 0, mtn_fail = 0, evt_ok = 0, evt_fail = 0;
-    long long tris = 0, verts = 0, motions = 0, keys = 0;
+    int stg_ok = 0, stg_fail = 0, stg_notable = 0;
+    long long tris = 0, verts = 0, motions = 0, keys = 0, stage_tris = 0;
     int suspect = 0;
 
     for (const auto& e : idx.entries()) {
@@ -287,6 +303,20 @@ static int cmd_regress(const char* game) {
             auto raw = read_file(e.path);
             PakArchive p;
             if (p.parse(raw.data(), raw.size())) pak_ok++; else pak_fail++;
+            continue;
+        }
+        if (e.kind == AssetKind::Stage) {
+            auto raw = read_file(e.path);
+            std::vector<uint8_t> img;
+            if (!rel_relocate(raw.data(), raw.size(), img)) { stg_fail++; continue; }
+            NinjaBlob blob(std::move(img), 0, true);
+            auto lts = find_landtables(blob);
+            if (lts.empty()) { stg_notable++; continue; }  // Chao/title RELs: no landtable
+            Model m;
+            if (build_landtable(blob, lts[0], m)) {
+                stg_ok++;
+                stage_tris += (long long)m.triangle_count();
+            } else stg_fail++;
             continue;
         }
         if (e.kind == AssetKind::Audio || e.kind == AssetKind::Video) continue;
@@ -372,10 +402,13 @@ static int cmd_regress(const char* game) {
     printf("  character motions  : %d ok, %d failed (%lld motions, %lld keys)\n",
            mtn_ok, mtn_fail, motions, keys);
     printf("  event scenes       : %d ok, %d failed\n", evt_ok, evt_fail);
+    printf("  stage geometry     : %d ok, %d failed, %d without landtable (%lld tris)\n",
+           stg_ok, stg_fail, stg_notable, stage_tris);
     printf("  geometry           : %lld vertices, %lld triangles\n", verts, tris);
     printf("  suspect bounds     : %d\n", suspect);
     printf("  elapsed            : %.1f s\n", secs);
-    int fails = prs_fail + pak_fail + gvm_fail + mdl_fail + mtn_fail + evt_fail + suspect;
+    int fails = prs_fail + pak_fail + gvm_fail + mdl_fail + mtn_fail + evt_fail +
+                stg_fail + suspect;
     printf("  RESULT             : %s\n", fails == 0 ? "ALL PASS" : "FAILURES PRESENT");
     printf("============================================================\n");
     return fails == 0 ? 0 : 2;
