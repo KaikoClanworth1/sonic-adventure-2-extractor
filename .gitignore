@@ -1,0 +1,49 @@
+# Build output
+/build/
+/exports/
+
+# Game files are copyrighted - never commit them.
+# (The game lives in the Steam folder; nothing here should ever hold assets,
+#  but these patterns make an accidental copy impossible to commit.)
+/resource/
+/redist/
+/Config/
+*.prs
+*.pak
+*.gvr
+*.gvp
+*.plt
+*.adx
+*.csb
+*.sfd
+*.m1v
+*.afs
+*.dds
+*.bnr
+sonic2app.exe
+Launcher.exe
+steam_api.dll
+SteamMetricsSDK.dll
+installscript.vdf
+steam_appid.txt
+
+# Exported assets
+*.fbx
+shot_*.png
+docs/screenshot*.png.tmp
+
+# Python bytecode (tools/)
+__pycache__/
+*.py[cod]
+
+# MSVC / editor cruft
+*.user
+*.suo
+*.sdf
+*.opensdf
+.vs/
+.vscode/
+*.pdb
+*.ilk
+*.idb
+*.log
