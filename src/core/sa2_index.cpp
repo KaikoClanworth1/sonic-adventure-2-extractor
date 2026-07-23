@@ -563,6 +563,22 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         }
         if (out.models.empty()) return fail("landtable produced no geometry");
         lts[0].texture_name = main_tex;
+        // Load the matching object layout (setNNNN_s.bin) into the same world
+        // space, so the viewer can overlay it, list objects and zoom to them.
+        int snum = stage_number(lower(e.name));
+        if (snum >= 0) {
+            char setname[24];
+            snprintf(setname, sizeof setname, "set%04d_s.bin", snum);
+            std::string target = lower(setname);
+            for (const auto& ae : idx.entries()) {
+                if (lower(ae.name) == target) {
+                    auto sd = load_file(ae.path);
+                    if (!sd.empty())
+                        parse_set_file(sd.data(), sd.size(), out.objects);
+                    break;
+                }
+            }
+        }
         // Textures: prefer the PC DDS PAK (highest-quality shipped), else the
         // GVR archive. landtx13 -> PRS/landtx13.pak or LANDTX13.PRS.
         if (!lts[0].texture_name.empty() && !idx.root().empty()) {

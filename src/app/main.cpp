@@ -110,6 +110,7 @@ struct DrawPart {
 
 struct Scene {
     std::vector<DrawPart> parts;
+    std::vector<DrawPart> markers;   // object-placement overlay (built from SET)
     std::vector<GLTexture> textures;
     float center[3]{0, 0, 0};
     float radius = 1.0f;
@@ -122,6 +123,7 @@ struct Scene {
         for (auto& t : textures) if (t.id) glDeleteTextures(1, &t.id);
         textures.clear();
         parts.clear();
+        markers.clear();
         tris = verts = 0;
         nodes = 0;
         anim_names.clear();
@@ -247,8 +249,41 @@ static void scene_geometry_from_model(const Model& m, Scene& sc,
 }
 
 // ------------------------------------------------------------------ camera
+// Build the object-placement overlay: one small unlit cube per placed object,
+// in the stage's own world space. sc.markers is drawn on top of the geometry.
+static void build_object_markers(const std::vector<sa2::SetObject>& objs,
+                                 float radius, Scene& sc) {
+    sc.markers.clear();
+    if (objs.empty()) return;
+    float s = std::max(radius * 0.008f, 0.5f);   // marker half-size
+    static const float cv[8][3] = {
+        {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+        {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+    static const int cf[36] = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+                               2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3};
+    DrawPart dp;
+    dp.tex = -1;
+    dp.double_sided = true;
+    dp.color[0] = 1.0f; dp.color[1] = 0.8f; dp.color[2] = 0.15f; dp.color[3] = 1.0f;
+    for (const auto& o : objs) {
+        unsigned int base = (unsigned int)(dp.pos.size() / 3);
+        for (int v = 0; v < 8; v++) {
+            dp.pos.push_back(o.pos[0] + cv[v][0] * s);
+            dp.pos.push_back(o.pos[1] + cv[v][1] * s);
+            dp.pos.push_back(o.pos[2] + cv[v][2] * s);
+        }
+        for (int k = 0; k < 36; k++) dp.idx.push_back(base + cf[k]);
+    }
+    sc.markers.push_back(std::move(dp));
+}
+
 struct Camera {
     float yaw = 0.7f, pitch = 0.35f, dist = 2.2f;
+    // When focused (zoom-to-object), orbit an absolute point at an absolute
+    // distance instead of the scene centre / radius-scaled distance.
+    bool focus = false;
+    float fpos[3]{0, 0, 0};
+    float fdist = 1.0f;
 };
 
 static void set_perspective(float fovy, float aspect, float zn, float zf) {
@@ -285,7 +320,7 @@ static void set_lookat(const float eye[3], const float ctr[3]) {
 
 static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
                        bool wireframe, bool lighting, bool textured,
-                       bool force_two_sided) {
+                       bool force_two_sided, bool show_objects) {
     glViewport(0, 0, w, h);
     glClearColor(0.10f, 0.11f, 0.14f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -298,11 +333,16 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
     set_perspective(0.9f, aspect, sc.radius * 0.01f + 0.001f, sc.radius * 60.0f + 20.0f);
 
     glMatrixMode(GL_MODELVIEW);
+    float ctr[3] = {sc.center[0], sc.center[1], sc.center[2]};
     float d = cam.dist * sc.radius;
-    float eye[3] = {sc.center[0] + cosf(cam.pitch) * sinf(cam.yaw) * d,
-                    sc.center[1] + sinf(cam.pitch) * d,
-                    sc.center[2] + cosf(cam.pitch) * cosf(cam.yaw) * d};
-    set_lookat(eye, sc.center);
+    if (cam.focus) {
+        ctr[0] = cam.fpos[0]; ctr[1] = cam.fpos[1]; ctr[2] = cam.fpos[2];
+        d = cam.fdist;
+    }
+    float eye[3] = {ctr[0] + cosf(cam.pitch) * sinf(cam.yaw) * d,
+                    ctr[1] + sinf(cam.pitch) * d,
+                    ctr[2] + cosf(cam.pitch) * cosf(cam.yaw) * d};
+    set_lookat(eye, ctr);
 
     if (lighting) {
         glEnable(GL_LIGHTING);
@@ -367,6 +407,23 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
             } else {
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             }
+            glDrawElements(GL_TRIANGLES, (GLsizei)p.idx.size(), GL_UNSIGNED_INT,
+                           p.idx.data());
+        }
+    }
+    // Object-placement markers: flat unlit cubes drawn over the geometry.
+    if (show_objects && !sc.markers.empty()) {
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDepthMask(GL_TRUE);
+        glDisableClientState(GL_NORMAL_ARRAY);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        for (const auto& p : sc.markers) {
+            if (p.pos.empty() || p.idx.empty()) continue;
+            glColor4fv(p.color);
+            glVertexPointer(3, GL_FLOAT, 0, p.pos.data());
             glDrawElements(GL_TRIANGLES, (GLsizei)p.idx.size(), GL_UNSIGNED_INT,
                            p.idx.data());
         }
@@ -512,6 +569,8 @@ int run_app() {
     // their backs, which reads as "missing meshes". Draw everything two-sided by
     // default so nothing disappears when you rotate around a map.
     bool show_backfaces = true;
+    bool show_objects = false;   // overlay a stage's placed-object markers
+    int object_sel = -1;         // highlighted object row
     bool show_settings = false;
     bool show_setup = index.entries().empty();
     char path_buf[512]{};
@@ -572,6 +631,24 @@ int run_app() {
                 if (model_sel < 0 && current.models.size() > 1) model_sel = 0;
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
+                // build the object-placement overlay and show it by default when a
+                // map has one, so its objects/NPCs are visible on load
+                build_object_markers(current.objects, scene.radius, scene);
+                show_objects = !current.objects.empty();
+                object_sel = -1;
+                // SA2VIEWER_OBJ=<index>: focus the camera on an object (zoom-to test)
+                std::string eobj = get_env("SA2VIEWER_OBJ");
+                if (!eobj.empty() && !current.objects.empty()) {
+                    int oi = atoi(eobj.c_str());
+                    if (oi >= 0 && oi < (int)current.objects.size()) {
+                        object_sel = oi;
+                        cam.focus = true;
+                        cam.fpos[0] = current.objects[oi].pos[0];
+                        cam.fpos[1] = current.objects[oi].pos[1];
+                        cam.fpos[2] = current.objects[oi].pos[2];
+                        cam.fdist = std::max(scene.radius * 0.12f, 8.0f);
+                    }
+                }
                 // A texture archive has no geometry; show its texture grid so the
                 // asset visibly loads instead of leaving an empty viewport.
                 show_textures = current.models.empty() && !current.textures.empty();
@@ -628,6 +705,7 @@ int run_app() {
         if (rebuild_scene) {
             scene_from_asset(current, scene, scene.title, model_sel);
             cam = Camera();
+            build_object_markers(current.objects, scene.radius, scene);
             anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
             anim_sel = pick_default_motion(anim_applicable, current.motions);
             anim_frame = 0.0f;
@@ -860,6 +938,13 @@ int run_app() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Draw single-sided stage walls from both sides so\n"
                               "they don't vanish when you orbit behind them.");
+        if (!current.objects.empty()) {
+            ImGui::Checkbox("Show objects", &show_objects);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Overlay a marker at every object/NPC the SET file\n"
+                                  "places in this map. (SA2 keeps the object models\n"
+                                  "themselves in sonic2app.exe, not in the game data.)");
+        }
         ImGui::Separator();
         if (current.models.size() > 1) {
             ImGui::Separator();
@@ -889,6 +974,36 @@ int run_app() {
         ImGui::BulletText("triangles %d", (int)scene.tris);
         ImGui::BulletText("textures  %d", (int)scene.textures.size());
         ImGui::BulletText("anims     %d", (int)current.motions.size());
+        if (!current.objects.empty()) {
+            ImGui::Separator();
+            ImGui::Text("Objects in map (%d)", (int)current.objects.size());
+            if (cam.focus) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Reset view")) { cam.focus = false; object_sel = -1; }
+            }
+            ImGui::TextDisabled("Click to zoom to an object.");
+            ImGui::BeginChild("objlist", ImVec2(0, 200 * cfg.ui_scale));
+            ImGuiListClipper clip;   // hundreds of rows: clip for performance
+            clip.Begin((int)current.objects.size());
+            while (clip.Step()) {
+                for (int i = clip.DisplayStart; i < clip.DisplayEnd; i++) {
+                    const auto& o = current.objects[i];
+                    char lbl[96];
+                    snprintf(lbl, sizeof lbl, "#%d  id 0x%03X  (%.0f, %.0f, %.0f)",
+                             i, o.object_id(), o.pos[0], o.pos[1], o.pos[2]);
+                    if (ImGui::Selectable(lbl, object_sel == i)) {
+                        object_sel = i;
+                        cam.focus = true;
+                        cam.fpos[0] = o.pos[0];
+                        cam.fpos[1] = o.pos[1];
+                        cam.fpos[2] = o.pos[2];
+                        cam.fdist = std::max(scene.radius * 0.12f, 8.0f);
+                        show_objects = true;
+                    }
+                }
+            }
+            ImGui::EndChild();
+        }
         ImGui::Separator();
         if (ImGui::Button("Export FBX") && !current.models.empty()) {
             std::error_code ec;
@@ -1001,12 +1116,16 @@ int run_app() {
                 cam.pitch = std::max(-1.5f, std::min(1.5f, cam.pitch + d.y * 0.008f));
                 ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
             }
-            if (io.MouseWheel != 0.0f)
-                cam.dist = std::max(0.15f, cam.dist * (1.0f - io.MouseWheel * 0.12f));
+            if (io.MouseWheel != 0.0f) {
+                float f = 1.0f - io.MouseWheel * 0.12f;
+                if (cam.focus) cam.fdist = std::max(0.05f, cam.fdist * f);
+                else cam.dist = std::max(0.15f, cam.dist * f);
+            }
         }
 
         ImGui::Render();
-        draw_scene(scene, cam, dw, dh, wireframe, lighting, textured, show_backfaces);
+        draw_scene(scene, cam, dw, dh, wireframe, lighting, textured, show_backfaces,
+                   show_objects);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         frame++;

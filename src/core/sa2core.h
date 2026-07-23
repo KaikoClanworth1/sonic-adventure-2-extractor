@@ -305,6 +305,10 @@ struct LoadedAsset {
     std::vector<Image> textures;
     std::string source;
 
+    // Placed objects for a loaded stage (parsed from its setNNNN_s.bin), in the
+    // same world space as the stage geometry. Empty for non-stage assets.
+    std::vector<SetObject> objects;
+
     // Re-pose context for animation playback: the decompressed model data, and
     // per-model the root pointer and animated-node count. The viewer rebuilds a
     // posed mesh with NinjaBlob(anim_data, 0, true).build_model_posed(root, ...).

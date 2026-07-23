@@ -29,6 +29,10 @@ verified by a batch regression that runs every parser over every shipped file.
   with a per-model / per-landtable selector, a **double-sided** toggle (SA2's
   single-sided stage walls otherwise vanish when you orbit behind them) and
   **animation playback** for characters (play/pause, frame scrubber).
+* **Overlays a map's placed objects** — loading a stage also loads its `setNNNN`
+  layout and drops a marker at every object/NPC, with an object list you can
+  **zoom to**. (SA2 keeps the object *models* in `sonic2app.exe`, so the markers
+  show placement, not the props themselves.)
 * **Exports to binary FBX** with meshes, UVs, materials, textures, the node
   skeleton, skin clusters and every animation as its own take.
 * **Exports a Unity/VRChat material set** — a `SA2Stage.shader` plus a
