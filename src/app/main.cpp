@@ -284,7 +284,8 @@ static void set_lookat(const float eye[3], const float ctr[3]) {
 }
 
 static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
-                       bool wireframe, bool lighting, bool textured) {
+                       bool wireframe, bool lighting, bool textured,
+                       bool force_two_sided) {
     glViewport(0, 0, w, h);
     glClearColor(0.10f, 0.11f, 0.14f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -338,7 +339,7 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
             } else {
                 glDisable(GL_TEXTURE_2D);
             }
-            if (p.double_sided) glDisable(GL_CULL_FACE);
+            if (p.double_sided || force_two_sided) glDisable(GL_CULL_FACE);
             else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
             glColor4fv(p.color);
             glVertexPointer(3, GL_FLOAT, 0, p.pos.data());
@@ -495,6 +496,10 @@ int run_app() {
     std::vector<int> anim_applicable;   // motions valid for the current model
     bool anim_dirty = false;     // re-pose next frame
     bool wireframe = false, lighting = true, textured = true, show_textures = false;
+    // SA2 stage walls are single-sided; a free-orbit camera sees straight through
+    // their backs, which reads as "missing meshes". Draw everything two-sided by
+    // default so nothing disappears when you rotate around a map.
+    bool show_backfaces = true;
     bool show_settings = false;
     bool show_setup = index.entries().empty();
     char path_buf[512]{};
@@ -584,6 +589,16 @@ int run_app() {
                 // camera back a little so the whole body stays framed rather than
                 // cropping in tight on the default distance.
                 if (!anim_applicable.empty()) cam.dist = 2.9f;
+                // diagnostic overrides for headless screenshots:
+                // SA2VIEWER_CAM="yaw,pitch,dist", SA2VIEWER_BACKFACES=0|1
+                std::string ecam = get_env("SA2VIEWER_CAM");
+                if (!ecam.empty()) {
+                    float y = cam.yaw, p = cam.pitch, d = cam.dist;
+                    sscanf(ecam.c_str(), "%f,%f,%f", &y, &p, &d);
+                    cam.yaw = y; cam.pitch = p; cam.dist = d;
+                }
+                std::string ebf = get_env("SA2VIEWER_BACKFACES");
+                if (!ebf.empty()) show_backfaces = atoi(ebf.c_str()) != 0;
                 char buf[256];
                 snprintf(buf, sizeof buf,
                          "%s: %d tris, %d textures, %d anims",
@@ -739,9 +754,11 @@ int run_app() {
             ImGui::OpenPopup("Settings");
             show_settings = false;
         }
-        ImGui::SetNextWindowSize(ImVec2(560 * cfg.ui_scale, 0), ImGuiCond_Appearing);
-        if (ImGui::BeginPopupModal("Settings", nullptr,
-                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+        // Pin the width every frame (height auto-fits content). Combining
+        // AlwaysAutoResize with the full-width (-1) InputText below made the
+        // popup converge on the button-row width and visibly shrink each frame.
+        ImGui::SetNextWindowSize(ImVec2(560 * cfg.ui_scale, 0));
+        if (ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_NoResize)) {
             ImGui::TextUnformatted("Game folder");
             ImGui::TextDisabled("The folder containing sonic2app.exe and resource\\gd_PC");
             ImGui::PushItemWidth(-1);
@@ -824,6 +841,10 @@ int run_app() {
         ImGui::Checkbox("Wireframe", &wireframe);
         ImGui::Checkbox("Lighting", &lighting);
         ImGui::Checkbox("Textures", &textured);
+        ImGui::Checkbox("Double-sided", &show_backfaces);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Draw single-sided stage walls from both sides so\n"
+                              "they don't vanish when you orbit behind them.");
         ImGui::Separator();
         if (current.models.size() > 1) {
             ImGui::Separator();
@@ -970,7 +991,7 @@ int run_app() {
         }
 
         ImGui::Render();
-        draw_scene(scene, cam, dw, dh, wireframe, lighting, textured);
+        draw_scene(scene, cam, dw, dh, wireframe, lighting, textured, show_backfaces);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         frame++;

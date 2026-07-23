@@ -26,8 +26,9 @@ verified by a batch regression that runs every parser over every shipped file.
   not raw file names. Auto-detects your Steam install; a first-run screen and a
   Settings panel let you set the game folder by hand if needed.
 * **Renders models and stages** in a textured, lit 3D viewport (orbit + zoom),
-  with a per-model / per-landtable selector and **animation playback** for
-  characters (play/pause, frame scrubber).
+  with a per-model / per-landtable selector, a **double-sided** toggle (SA2's
+  single-sided stage walls otherwise vanish when you orbit behind them) and
+  **animation playback** for characters (play/pause, frame scrubber).
 * **Exports to binary FBX** with meshes, UVs, materials, textures, the node
   skeleton, skin clusters and every animation as its own take.
 * **Exports a Unity/VRChat material set** — a `SA2Stage.shader` plus a
