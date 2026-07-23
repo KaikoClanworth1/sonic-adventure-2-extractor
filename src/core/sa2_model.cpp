@@ -224,6 +224,12 @@ struct CPoly {
     uint8_t flags = 0;
     uint32_t diffuse = 0xFFFFFFFFu;
     bool use_alpha = false;
+    // control markers: 4 = CacheList, 5 = DrawList (carry cache_id, no strips);
+    // any other value is an ordinary strip chunk. src_node is the node the chunk
+    // was physically parsed from (preserved when a cached chunk is drawn later).
+    int chunk_type = 64;
+    int cache_id = -1;
+    int src_node = 0;
 };
 
 // Parse a vertex chunk stream into a list of chunks, preserving weight status
@@ -306,7 +312,15 @@ static void parse_polys(const NinjaBlob& b, size_t off, std::vector<CPoly>& out)
         int flag = (int)(w >> 8);
         if (head == 255) return;
         if (head == 0) { off += 2; continue; }
-        if (head >= 1 && head <= 5) { off += 2; continue; }
+        if (head == 4 || head == 5) {   // CacheList / DrawList control marker
+            CPoly ctl;
+            ctl.chunk_type = head;
+            ctl.cache_id = flag;        // the slot to store into / draw from
+            out.push_back(std::move(ctl));
+            off += 2;
+            continue;
+        }
+        if (head >= 1 && head <= 3) { off += 2; continue; }   // blend/mipmap/spec
         if (head == 8 || head == 9) {
             cur_tex = (int)(b.u16(off + 2) & 0x1FFF);
             off += 4;
@@ -521,78 +535,106 @@ bool NinjaBlob::build_model_posed(uint32_t root, const Motion* motion, float fra
         }
     };
 
+    // Build one MeshPart from a single strip chunk, resolving each corner against
+    // the current vertex cache. `node_index` labels the owning node (for a cached
+    // mesh this is the node it was defined on, not the one that draws it).
+    auto build_part = [&](const CPoly& poly, int node_index) {
+        MeshPart part;
+        part.texture_id = poly.texture_id;
+        part.node_index = node_index;
+        part.double_sided = (poly.flags & 0x80) != 0;
+        part.use_alpha = poly.use_alpha;
+        part.diffuse = poly.diffuse;
+        std::map<std::pair<int, uint64_t>, uint32_t> remap;
+        for (auto& st : poly.strips) {
+            size_t cnt = st.idx.size();
+            bool has_uv = st.uv.size() >= cnt * 2;
+            for (size_t k = 0; k + 2 < cnt; k++) {
+                int tri[3] = {st.idx[k], st.idx[k + 1], st.idx[k + 2]};
+                int tuv[3] = {(int)k, (int)k + 1, (int)k + 2};
+                bool flip = (k % 2 == 1);
+                if (st.reversed) flip = !flip;
+                if (flip) { std::swap(tri[0], tri[1]); std::swap(tuv[0], tuv[1]); }
+                if (tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2])
+                    continue;
+                uint32_t vi[3];
+                bool good = true;
+                for (int c = 0; c < 3; c++) {
+                    int ci = tri[c];
+                    if (ci < 0 || ci >= (int)cache.size() || !cache[ci].live) {
+                        good = false; break;
+                    }
+                    const CacheSlot& s = cache[ci];
+                    float inv = (s.wsum != 0.0f) ? 1.0f / s.wsum : 1.0f;
+                    float u = 0, v = 0;
+                    if (has_uv) { u = st.uv[tuv[c] * 2]; v = st.uv[tuv[c] * 2 + 1]; }
+                    uint64_t uvkey = ((uint64_t)(int32_t)(u * 4096.0f) << 32) ^
+                                     (uint32_t)(int32_t)(v * 4096.0f);
+                    auto key = std::make_pair(ci, uvkey);
+                    auto rit = remap.find(key);
+                    if (rit != remap.end()) { vi[c] = rit->second; continue; }
+                    uint32_t ni = (uint32_t)(part.positions.size() / 3);
+                    remap[key] = ni;
+                    part.positions.insert(part.positions.end(),
+                                          {s.pos[0] * inv, s.pos[1] * inv, s.pos[2] * inv});
+                    float nx = s.nrm[0] * inv, ny = s.nrm[1] * inv, nz = s.nrm[2] * inv;
+                    float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+                    if (nl > 1e-8f) { nx /= nl; ny /= nl; nz /= nl; }
+                    else { nx = 0; ny = 1; nz = 0; }
+                    part.normals.insert(part.normals.end(), {nx, ny, nz});
+                    part.uvs.push_back(u);
+                    part.uvs.push_back(v);
+                    part.colors.push_back(s.diffuse);
+                    part.vertex_node.push_back(s.node);
+                    vi[c] = ni;
+                }
+                if (!good) continue;
+                part.indices.insert(part.indices.end(), {vi[0], vi[1], vi[2]});
+            }
+        }
+        if (!part.indices.empty()) out.parts.push_back(std::move(part));
+    };
+
+    // Model-level poly-chunk cache implementing SA2's CacheList(4)/DrawList(5):
+    // a skinned mesh's polygons are stored on one bone and DRAWN by a later bone,
+    // once every weighted contribution is in the vertex cache. This replaces the
+    // old post-order hack, which drew a container's polygons only after the whole
+    // subtree had overwritten the shared cache (collapsing e.g. Sonic's torso).
+    std::unordered_map<int, std::vector<CPoly>> poly_cache;
+
     auto read_polys = [&](const Node& nd) {
         if (!valid_attach(nd.attach_ptr)) return;
         uint32_t pl = u32(off(nd.attach_ptr) + 4);
         if (!ok(pl)) return;
         std::vector<CPoly> polys;
         parse_polys(*this, off(pl), polys);
-        for (auto& poly : polys) {
-            MeshPart part;
-            part.texture_id = poly.texture_id;
-            part.node_index = nd.index;
-            part.double_sided = (poly.flags & 0x80) != 0;
-            part.use_alpha = poly.use_alpha;
-            part.diffuse = poly.diffuse;
-            std::map<std::pair<int, uint64_t>, uint32_t> remap;
-            for (auto& st : poly.strips) {
-                size_t cnt = st.idx.size();
-                bool has_uv = st.uv.size() >= cnt * 2;
-                for (size_t k = 0; k + 2 < cnt; k++) {
-                    int tri[3] = {st.idx[k], st.idx[k + 1], st.idx[k + 2]};
-                    int tuv[3] = {(int)k, (int)k + 1, (int)k + 2};
-                    bool flip = (k % 2 == 1);
-                    if (st.reversed) flip = !flip;
-                    if (flip) { std::swap(tri[0], tri[1]); std::swap(tuv[0], tuv[1]); }
-                    if (tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2])
-                        continue;
-                    uint32_t vi[3];
-                    bool good = true;
-                    for (int c = 0; c < 3; c++) {
-                        int ci = tri[c];
-                        if (ci < 0 || ci >= (int)cache.size() || !cache[ci].live) {
-                            good = false; break;
-                        }
-                        const CacheSlot& s = cache[ci];
-                        float inv = (s.wsum != 0.0f) ? 1.0f / s.wsum : 1.0f;
-                        float u = 0, v = 0;
-                        if (has_uv) { u = st.uv[tuv[c] * 2]; v = st.uv[tuv[c] * 2 + 1]; }
-                        uint64_t uvkey = ((uint64_t)(int32_t)(u * 4096.0f) << 32) ^
-                                         (uint32_t)(int32_t)(v * 4096.0f);
-                        auto key = std::make_pair(ci, uvkey);
-                        auto rit = remap.find(key);
-                        if (rit != remap.end()) { vi[c] = rit->second; continue; }
-                        uint32_t ni = (uint32_t)(part.positions.size() / 3);
-                        remap[key] = ni;
-                        part.positions.insert(part.positions.end(),
-                                              {s.pos[0] * inv, s.pos[1] * inv, s.pos[2] * inv});
-                        float nx = s.nrm[0] * inv, ny = s.nrm[1] * inv, nz = s.nrm[2] * inv;
-                        float nl = sqrtf(nx * nx + ny * ny + nz * nz);
-                        if (nl > 1e-8f) { nx /= nl; ny /= nl; nz /= nl; }
-                        else { nx = 0; ny = 1; nz = 0; }
-                        part.normals.insert(part.normals.end(), {nx, ny, nz});
-                        part.uvs.push_back(u);
-                        part.uvs.push_back(v);
-                        part.colors.push_back(s.diffuse);
-                        part.vertex_node.push_back(s.node);
-                        vi[c] = ni;
-                    }
-                    if (!good) continue;
-                    part.indices.insert(part.indices.end(), {vi[0], vi[1], vi[2]});
+        int caching = -1;
+        for (auto& pc : polys) {
+            if (pc.chunk_type == 4) {              // CacheList: reset + capture
+                caching = pc.cache_id;
+                poly_cache[caching].clear();
+            } else if (pc.chunk_type == 5) {       // DrawList: draw a slot now
+                auto it = poly_cache.find(pc.cache_id);
+                if (it != poly_cache.end())
+                    for (auto& c : it->second) build_part(c, c.src_node);
+            } else if (!pc.strips.empty()) {       // ordinary strip chunk
+                if (caching >= 0) {
+                    pc.src_node = nd.index;
+                    poly_cache[caching].push_back(std::move(pc));
+                } else {
+                    build_part(pc, nd.index);
                 }
             }
-            if (!part.indices.empty()) out.parts.push_back(std::move(part));
         }
     };
 
-    // Vertices process in pre-order (descending); polygons in post-order (after
-    // a node's children). A skinned mesh stores its polygon on a container node
-    // while the deforming vertices live on child bones, so the polygon must be
-    // read only after those children have written to the cache.
+    // Pre-order traversal: each node writes its vertices to the cache, then draws
+    // its active polygons (its own strips plus any cached strips a DrawList pulls
+    // in). This mirrors the game's own chunk evaluation order.
     std::function<void(int)> visit = [&](int i) {
         accumulate(out.nodes[i]);
-        for (int c : children[i]) visit(c);
         read_polys(out.nodes[i]);
+        for (int c : children[i]) visit(c);
     };
     for (int r : roots) visit(r);
     return !out.parts.empty();

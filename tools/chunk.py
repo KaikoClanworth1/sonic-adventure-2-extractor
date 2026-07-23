@@ -142,10 +142,14 @@ class Strip:
 
 
 class PolyChunk:
-    """A strip chunk together with the material state in force when it appears."""
+    """A strip chunk together with the material state in force when it appears.
+
+    chunk_type 4 (CacheList) / 5 (DrawList) are control markers carrying
+    `cache_id`; they hold no strips and drive the deferred skinned-draw
+    mechanism (see resolve_active_polys)."""
     __slots__ = ("strips", "texture_id", "flags", "diffuse", "ambient",
                  "specular", "chunk_type", "uv_scale", "blend_src", "blend_dst",
-                 "tex_flags")
+                 "tex_flags", "cache_id")
 
     def __init__(self):
         self.strips = []
@@ -159,6 +163,7 @@ class PolyChunk:
         self.blend_src = 0
         self.blend_dst = 0
         self.tex_flags = 0
+        self.cache_id = -1
 
 
 # ----------------------------------------------------------------- readers
@@ -245,6 +250,30 @@ def parse_vertex_chunks(data, off, limit=None):
     return verts
 
 
+def resolve_active_polys(chunks, poly_cache):
+    """Apply SA2's CacheList(4)/DrawList(5) deferral to one node's poly chunks.
+
+    `poly_cache` is a model-level dict {slot: [PolyChunk]} that PERSISTS across
+    nodes. A CacheList stores the strips that follow (within this node) into the
+    slot instead of drawing them; a DrawList injects a slot's stored strips into
+    the active list to be drawn now, against the vertex cache accumulated so far.
+    Returns the PolyChunks (strips) to draw at this node, in order."""
+    active = []
+    caching = -1
+    for pc in chunks:
+        if pc.chunk_type == 4:            # CacheList: start capturing into slot
+            caching = pc.cache_id
+            poly_cache[caching] = []
+        elif pc.chunk_type == 5:          # DrawList: draw a slot's stored strips
+            active.extend(poly_cache.get(pc.cache_id, []))
+        elif pc.strips:                   # a real strip chunk
+            if caching >= 0:
+                poly_cache[caching].append(pc)
+            else:
+                active.append(pc)
+    return active
+
+
 def parse_poly_chunks(data, off):
     """Parse a polygon chunk stream. Returns a list of PolyChunk."""
     out = []
@@ -268,7 +297,14 @@ def parse_poly_chunks(data, off):
         if head == 0:
             off += 2
             continue
-        if 1 <= head <= 5:                     # Bits
+        if head in (4, 5):                     # CacheList / DrawList control
+            ctl = PolyChunk()
+            ctl.chunk_type = head
+            ctl.cache_id = flag
+            out.append(ctl)
+            off += 2
+            continue
+        if 1 <= head <= 3:                     # Bits (blend / mipmap / specular)
             if head == 1:
                 blend_src = (flag >> 3) & 7
                 blend_dst = flag & 7

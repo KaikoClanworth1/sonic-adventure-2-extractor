@@ -49,7 +49,7 @@ verified by a batch regression that runs every parser over every shipped file.
   character motions  : 17 ok, 0 failed (817 motions, 345380 keys)
   event scenes       : 67 ok, 0 failed
   stage geometry     : 64 ok, 0 failed, 2 without landtable (999559 tris)
-  geometry           : 1051417 vertices, 1118404 triangles
+  geometry           : 1193400 vertices, 1303917 triangles
   suspect bounds     : 0
   RESULT             : ALL PASS
 ```
@@ -166,6 +166,15 @@ Other limits:
 Character models use SA2's **cached weighted skinning** (the arms, legs and torso
 blend between bones). Each vertex is baked to its bind-pose world position; the
 FBX binds it to its dominant bone, so the mesh is solid and correctly shaped.
+A skinned mesh's polygons are also **deferred**: SA2 stores them on one bone with
+a *CacheList* chunk and draws them from a later bone with a *DrawList* chunk, once
+every bone that deforms the mesh has written its weighted vertices to the shared
+cache. The viewer honours this, so the torso (Sonic's body is drawn well after its
+spine bones are posed) resolves in the right place instead of collapsing.
+
+When a character loads the viewer **auto-plays its idle** — SA2 stores characters
+in a raw, collapsed bind pose, so playing a motion is what makes the body read
+correctly. Press **Bind pose** to see the unposed data, or pick any other motion.
 
 A character's `*mdl.prs` holds many models — the first file entry is often a
 partial sub-model, so the viewer surfaces the fullest model that matches an

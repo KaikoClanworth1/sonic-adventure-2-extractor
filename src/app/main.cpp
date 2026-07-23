@@ -398,6 +398,21 @@ static std::string get_env(const char* key) {
     return std::string();
 }
 
+// Pick a sensible motion to auto-play on load: the applicable motion with the
+// most frames. The longest motion is a smooth loop rather than a 2-4 frame
+// flicker, and for the playable characters it is the in-place idle/wait cycle,
+// which is what makes an otherwise raw-bind-pose character read correctly.
+static int pick_default_motion(const std::vector<int>& applicable,
+                               const std::vector<Motion>& motions) {
+    int best = -1;
+    for (int mi : applicable) {
+        if (mi < 0 || mi >= (int)motions.size()) continue;
+        if (best < 0 || motions[mi].frame_count > motions[best].frame_count)
+            best = mi;
+    }
+    return best;
+}
+
 static Model merge_models(const std::vector<Model>& models, const std::string& name) {
     Model merged;
     merged.name = name;
@@ -541,12 +556,19 @@ int run_app() {
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
                 // set up animation: which motions apply to this model?
-                anim_sel = -1;
-                anim_frame = 0.0f;
-                anim_playing = false;
                 anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
+                // Auto-play a default motion (the idle) so the character animates
+                // on load instead of showing SA2's collapsed raw bind pose, which
+                // is what makes an un-posed character look like its body is
+                // missing.
+                anim_sel = pick_default_motion(anim_applicable, current.motions);
+                anim_frame = 0.0f;
+                anim_playing = anim_sel >= 0;
+                anim_last_time = 0.0;
+                anim_dirty = anim_sel >= 0;
                 // debug hooks: SA2VIEWER_ANIM = index into applicable list,
-                // SA2VIEWER_ANIMFRAME = frame number
+                // SA2VIEWER_ANIMFRAME = frame number (holds a fixed frame so a
+                // screenshot is deterministic)
                 std::string ea = get_env("SA2VIEWER_ANIM");
                 if (!ea.empty() && !anim_applicable.empty()) {
                     int ai = atoi(ea.c_str());
@@ -554,9 +576,14 @@ int run_app() {
                         anim_sel = anim_applicable[ai];
                         std::string ef = get_env("SA2VIEWER_ANIMFRAME");
                         anim_frame = ef.empty() ? 0.0f : (float)atof(ef.c_str());
+                        anim_playing = false;
                         anim_dirty = true;
                     }
                 }
+                // A playing character swings limbs through a wide arc; pull the
+                // camera back a little so the whole body stays framed rather than
+                // cropping in tight on the default distance.
+                if (!anim_applicable.empty()) cam.dist = 2.9f;
                 char buf[256];
                 snprintf(buf, sizeof buf,
                          "%s: %d tris, %d textures, %d anims",
@@ -571,10 +598,13 @@ int run_app() {
         if (rebuild_scene) {
             scene_from_asset(current, scene, scene.title, model_sel);
             cam = Camera();
-            anim_sel = -1;
-            anim_playing = false;
-            anim_frame = 0.0f;
             anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
+            anim_sel = pick_default_motion(anim_applicable, current.motions);
+            anim_frame = 0.0f;
+            anim_playing = anim_sel >= 0;
+            anim_last_time = 0.0;
+            anim_dirty = anim_sel >= 0;
+            if (!anim_applicable.empty()) cam.dist = 2.9f;
             rebuild_scene = false;
         }
 

@@ -192,9 +192,11 @@ Types actually used: 44 `VertexNormalNinjaFlags`, 41 `VertexNormal`,
 
 ### Polygon chunks
 
-`1..5` Bits, `8..9` texture ID (`id = u16 & 0x1FFF`), `16..31` material
-(bit 0 diffuse, bit 1 ambient, bit 2 specular — each one ARGB u32, swapped as u16
-pairs), `56..58` volume, `64..75` strip, `255` end.
+`1..3` Bits (blend / mipmap / specular), **`4` CacheList** and **`5` DrawList**
+(the flag byte carries a cache-slot id — see skinning below), `8..9` texture ID
+(`id = u16 & 0x1FFF`), `16..31` material (bit 0 diffuse, bit 1 ambient, bit 2
+specular — each one ARGB u32, swapped as u16 pairs), `56..58` volume, `64..75`
+strip, `255` end.
 
 Strip chunk: `u16 header` where `nbStrip = h & 0x3FFF` and `userFlagSize = h >> 14`,
 then per strip a `s16 length` (**negative means reversed winding**) followed by
@@ -204,10 +206,10 @@ that many `u16` indices, each optionally trailed by a `s16` UV pair
 Strip counts, indices and UVs must all be bounded by the chunk's declared size,
 or a corrupt chunk will read megabytes of garbage.
 
-### The vertex cache, weighted skinning, and the pre/post-order split
+### The vertex cache, weighted skinning, and deferred polygon lists
 
-This is the part that is easy to get wrong, and it took a full second pass to get
-right. A vertex chunk writes into a single cache shared across the whole tree, at
+This is the part that is easy to get wrong, and it took two passes to get right. A
+vertex chunk writes into a single cache shared across the whole tree, at
 `indexOffset`, and a node's polygon chunks may index vertices uploaded by a
 **different** node.
 
@@ -220,14 +222,21 @@ mechanism:
 * Each vertex chunk has a **WeightStatus** (`flags & 3`): **0 = Start** (replace
   the cache slot), **1 = Middle** / **2 = End** (add to it). A skinned vertex ends
   up as `Σ weightₖ · (worldMatrixₖ · localPosₖ)`, divided by `Σ weightₖ`.
-* **Vertices are processed pre-order (descending the tree); polygons are processed
-  post-order (after a node's children).** A skinned mesh stores its polygon on a
-  container node while the deforming vertices live on the child bones, so the
-  polygon must be read only after those children have written to the cache.
-  Reading polygons in plain pre-order scatters every skinned limb; reading all
-  vertices first and then all polygons corrupts the rigid meshes that reuse low
-  cache slots. The pre-order-vertices / post-order-polygons split is what makes
-  both work. (See `tools/skinning_reference.py`.)
+* The whole model is walked in **pre-order**; at each node its vertex chunks fill
+  the cache, then its *active* polygon chunks are drawn against the cache as it
+  stands. But a skinned mesh cannot be drawn where its polygons are stored,
+  because the bones that deform it are visited *later*. That is what **CacheList**
+  and **DrawList** are for: a `CacheList(n)` chunk says "store the strips that
+  follow into slot *n*, don't draw them"; a later node's `DrawList(n)` says "draw
+  slot *n*'s strips now". So Sonic's torso is stored on a node near the root and
+  actually drawn from a node deep in the spine, once every contributing bone has
+  written its weighted vertices. A model-level `slot → strips` table, reset by each
+  CacheList and replayed by each DrawList, is all it takes.
+
+  Getting this wrong is exactly the "missing body" bug: draw the torso where its
+  polygons live (or dead-last in post-order) and it resolves against a cache that
+  has been overwritten, collapsing into a fan of triangles. (See
+  `tools/build_correct.py`.)
 
 ---
 
