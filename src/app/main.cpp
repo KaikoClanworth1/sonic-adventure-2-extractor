@@ -320,7 +320,6 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
         glDisable(GL_LIGHTING);
     }
     glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
-    glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glAlphaFunc(GL_GREATER, 0.03f);
     glEnable(GL_ALPHA_TEST);
@@ -328,9 +327,18 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
+    // Two passes. Pass 0 draws solid geometry with blending OFF and depth
+    // writes ON, so a surface whose material diffuse alpha merely happens to be
+    // below 1.0 can no longer ghost a wall into transparency. Pass 1 draws the
+    // genuinely alpha-blended surfaces (only those the material flags as such)
+    // with depth writes OFF, so a translucent pane does not punch a hole in the
+    // depth buffer and reveal the void behind it. A sub-1 diffuse alpha alone no
+    // longer counts as "translucent".
     for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
+        else { glEnable(GL_BLEND); glDepthMask(GL_FALSE); }
         for (const auto& p : sc.parts) {
-            bool blend = p.blend || p.color[3] < 0.99f;
+            bool blend = p.blend;
             if ((pass == 0) == blend) continue;
             if (p.pos.empty() || p.idx.empty()) continue;
             if (textured && p.tex >= 0 && p.tex < (int)sc.textures.size()) {
@@ -341,7 +349,9 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
             }
             if (p.double_sided || force_two_sided) glDisable(GL_CULL_FACE);
             else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
-            glColor4fv(p.color);
+            float col[4] = {p.color[0], p.color[1], p.color[2],
+                            pass == 0 ? 1.0f : p.color[3]};
+            glColor4fv(col);
             glVertexPointer(3, GL_FLOAT, 0, p.pos.data());
             bool has_n = (p.nrm.size() == p.pos.size());
             if (has_n) {
@@ -361,6 +371,8 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
                            p.idx.data());
         }
     }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     glDisableClientState(GL_VERTEX_ARRAY);
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -560,6 +572,9 @@ int run_app() {
                 if (model_sel < 0 && current.models.size() > 1) model_sel = 0;
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
+                // A texture archive has no geometry; show its texture grid so the
+                // asset visibly loads instead of leaving an empty viewport.
+                show_textures = current.models.empty() && !current.textures.empty();
                 // set up animation: which motions apply to this model?
                 anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
                 // Auto-play a default motion (the idle) so the character animates

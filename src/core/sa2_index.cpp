@@ -582,6 +582,55 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         return true;
     }
 
+    if (e.kind == AssetKind::SetPlacement) {
+        // No standalone object models ship in gd_PC (the id->model table lives in
+        // the community objdefs / the exe), so visualise the layout as a marker
+        // cube at every placed object's position. This makes the "object layout"
+        // entries load, and is the geometry a stage overlay / object list builds on.
+        std::vector<SetObject> objs;
+        if (!parse_set_file(data.data(), data.size(), objs) || objs.empty())
+            return fail("no objects in SET file");
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto& o : objs)
+            for (int k = 0; k < 3; k++) {
+                lo[k] = std::min(lo[k], o.pos[k]);
+                hi[k] = std::max(hi[k], o.pos[k]);
+            }
+        float ext = std::max(std::max(hi[0] - lo[0], hi[1] - lo[1]),
+                             std::max(hi[2] - lo[2], 1.0f));
+        float s = ext * 0.004f;   // marker half-size, relative to the layout extent
+        static const float cv[8][3] = {
+            {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+            {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+        static const int cf[12][3] = {
+            {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+            {2, 3, 7}, {2, 7, 6}, {1, 2, 6}, {1, 6, 5}, {0, 4, 7}, {0, 7, 3}};
+        Model m;
+        m.name = "objects";
+        MeshPart part;
+        part.texture_id = -1;
+        part.double_sided = true;
+        part.diffuse = 0xFFFFCC22;   // amber
+        for (const auto& o : objs) {
+            uint32_t base = (uint32_t)(part.positions.size() / 3);
+            for (int v = 0; v < 8; v++) {
+                part.positions.insert(part.positions.end(),
+                    {o.pos[0] + cv[v][0] * s, o.pos[1] + cv[v][1] * s,
+                     o.pos[2] + cv[v][2] * s});
+                part.normals.insert(part.normals.end(), {0.0f, 1.0f, 0.0f});
+                part.uvs.insert(part.uvs.end(), {0.0f, 0.0f});
+                part.colors.push_back(part.diffuse);
+                part.vertex_node.push_back(0);
+            }
+            for (int f = 0; f < 12; f++)
+                for (int k = 0; k < 3; k++)
+                    part.indices.push_back(base + cf[f][k]);
+        }
+        m.parts.push_back(std::move(part));
+        out.models.push_back(std::move(m));
+        return true;
+    }
+
     // Unknown: try every interpretation we have.
     if (data.size() >= 4 && memcmp(data.data(), "GVMH", 4) == 0)
         return gvm_extract(data.data(), data.size(), out.textures)
