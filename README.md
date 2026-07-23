@@ -26,7 +26,8 @@ verified by a batch regression that runs every parser over every shipped file.
   not raw file names. Auto-detects your Steam install; a first-run screen and a
   Settings panel let you set the game folder by hand if needed.
 * **Renders models and stages** in a textured, lit 3D viewport (orbit + zoom),
-  with a per-model / per-landtable selector.
+  with a per-model / per-landtable selector and **animation playback** for
+  characters (play/pause, frame scrubber).
 * **Exports to binary FBX** with meshes, UVs, materials, textures, the node
   skeleton, skin clusters and every animation as its own take.
 * **Exports a Unity/VRChat material set** — a `SA2Stage.shader` plus a
@@ -165,6 +166,12 @@ Other limits:
 Character models use SA2's **cached weighted skinning** (the arms, legs and torso
 blend between bones). Each vertex is baked to its bind-pose world position; the
 FBX binds it to its dominant bone, so the mesh is solid and correctly shaped.
+
+A character's `*mdl.prs` holds many models — the first file entry is often a
+partial sub-model, so the viewer surfaces the fullest model that matches an
+animation's skeleton (by animated-node count) and shows that by default. The
+matching `*mtn.prs` motions are applied to pose it; SA2 stores characters in a
+raw bind pose, so the idle/animation is what makes them look right.
 
 ## Format notes
 

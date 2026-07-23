@@ -10,8 +10,7 @@ from sa2fmt import prs_decompress
 from eventmodel import NinjaFile
 from mdlmtn import read_mdl_table
 from build import valid_attach, mat_from_srt, mat_mul, xform_point, xform_dir
-from chunk import parse_poly_chunks
-from build_skinned import parse_vchunks
+from chunk import parse_poly_chunks, parse_vchunks
 
 
 def build(nf, root_ptr):

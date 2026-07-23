@@ -147,7 +147,13 @@ public:
     // Builds model-space geometry. Chunk models share one vertex cache across
     // the whole node tree, so this happens in a single traversal.
     bool build_model(uint32_t root, Model& out) const;
+    // As build_model, but poses the skeleton with `motion` at `frame` first
+    // (motion == nullptr gives the bind pose). Used for animation playback.
+    bool build_model_posed(uint32_t root, const Motion* motion, float frame,
+                           Model& out) const;
     bool read_motion(uint32_t ptr, int node_count, Motion& out) const;
+    // Count of nodes that a motion animates (those without the NoAnimate flag).
+    int count_animated(uint32_t root) const;
     // Structural scan for NJS_OBJECT roots that own a real attach.
     std::vector<uint32_t> find_model_roots() const;
 
@@ -298,6 +304,22 @@ struct LoadedAsset {
     std::vector<Motion> motions;
     std::vector<Image> textures;
     std::string source;
+
+    // Re-pose context for animation playback: the decompressed model data, and
+    // per-model the root pointer and animated-node count. The viewer rebuilds a
+    // posed mesh with NinjaBlob(anim_data, 0, true).build_model_posed(root, ...).
+    std::vector<uint8_t> anim_data;
+    std::vector<uint32_t> model_roots;
+    std::vector<int> model_anim_count;
+
+    // Motions that apply to model `mi` (node_count == its animated count).
+    std::vector<int> motions_for(int mi) const {
+        std::vector<int> out;
+        if (mi < 0 || mi >= (int)model_anim_count.size()) return out;
+        for (int i = 0; i < (int)motions.size(); i++)
+            if (motions[i].node_count == model_anim_count[mi]) out.push_back(i);
+        return out;
+    }
 };
 bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
                 std::string* error = nullptr);

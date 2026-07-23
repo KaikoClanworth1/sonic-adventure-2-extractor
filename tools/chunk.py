@@ -52,6 +52,66 @@ VERTEX_SIZE_U32 = {
 
 # which chunk types actually carry a per-vertex normal
 HAS_NORMAL = {33, 41, 42, 43, 44, 45, 46, 47}
+# weighted vertex types (carry a per-vertex ninja-flags word: index + weight)
+WEIGHTED_TYPES = {37, 44}
+
+
+def parse_vchunks(data, off):
+    """Parse a vertex chunk stream into a list of chunks preserving WeightStatus
+    and, for weighted types, per-vertex cache index + skin weight.
+
+    Returns [dict(status, weighted, verts=[(pos, normal_or_None, cache_index,
+    weight)])]. status: 0=Start(replace), 1=Middle(add), 2=End(add)."""
+    n = len(data)
+    chunks = []
+    for _ in range(4096):
+        if off + 8 > n:
+            break
+        w = _u32be(data, off)
+        head = w & 0xFF
+        flag = (w >> 8) & 0xFF
+        size = w >> 16
+        if head == 0xFF:
+            break
+        if head == 0:
+            off += 4
+            continue
+        if head not in VERTEX_TYPES:
+            break
+        w2 = _u32be(data, off + 4)
+        index_offset = w2 & 0xFFFF
+        nb = w2 >> 16
+        body = off + 8
+        stride = (size - 1) // nb if nb > 0 and size >= 1 else 6
+        status = flag & 3
+        weighted = head in WEIGHTED_TYPES
+        has_nrm = head in HAS_NORMAL
+        verts = []
+        if stride >= 3 and nb > 0:
+            for i in range(nb):
+                vo = body + i * stride * 4
+                if vo + stride * 4 > n:
+                    break
+                pos = (_f32_from_u32(_u32be(data, vo)),
+                       _f32_from_u32(_u32be(data, vo + 4)),
+                       _f32_from_u32(_u32be(data, vo + 8)))
+                nrm = None
+                if has_nrm and stride >= 6:
+                    nrm = (_f32_from_u32(_u32be(data, vo + 12)),
+                           _f32_from_u32(_u32be(data, vo + 16)),
+                           _f32_from_u32(_u32be(data, vo + 20)))
+                if weighted:
+                    foff = vo + (24 if has_nrm else 12)
+                    fl = _u32be(data, foff) if foff + 4 <= n else 0
+                    cidx = (fl & 0xFFFF) + index_offset
+                    weight = ((fl >> 16) & 0xFF) / 255.0
+                else:
+                    cidx = index_offset + i
+                    weight = 1.0
+                verts.append((pos, nrm, cidx, weight))
+        chunks.append(dict(status=status, weighted=weighted, verts=verts))
+        off += 4 + size * 4
+    return chunks
 
 
 class Vertex:

@@ -201,6 +201,51 @@ static void scene_from_asset(const LoadedAsset& la, Scene& sc,
                                 " frames)");
 }
 
+// Rebuild only the drawable geometry from one (posed) model, keeping the
+// uploaded GL textures and the camera framing. Used every animation frame.
+static void scene_geometry_from_model(const Model& m, Scene& sc,
+                                      bool update_bounds) {
+    sc.parts.clear();
+    sc.tris = sc.verts = 0;
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (const auto& p : m.parts) {
+        DrawPart dp;
+        dp.pos = p.positions;
+        dp.nrm = p.normals;
+        dp.uv = p.uvs;
+        dp.idx.assign(p.indices.begin(), p.indices.end());
+        dp.tex = p.texture_id;
+        dp.double_sided = p.double_sided;
+        dp.blend = p.use_alpha;
+        uint32_t d = p.diffuse;
+        dp.color[0] = ((d >> 16) & 0xFF) / 255.0f;
+        dp.color[1] = ((d >> 8) & 0xFF) / 255.0f;
+        dp.color[2] = (d & 0xFF) / 255.0f;
+        dp.color[3] = ((d >> 24) & 0xFF) / 255.0f;
+        if (dp.color[3] <= 0.01f) dp.color[3] = 1.0f;
+        sc.tris += dp.idx.size() / 3;
+        sc.verts += dp.pos.size() / 3;
+        if (update_bounds)
+            for (size_t i = 0; i + 2 < dp.pos.size(); i += 3) {
+                any = true;
+                for (int k = 0; k < 3; k++) {
+                    lo[k] = std::min(lo[k], dp.pos[i + k]);
+                    hi[k] = std::max(hi[k], dp.pos[i + k]);
+                }
+            }
+        sc.parts.push_back(std::move(dp));
+    }
+    if (update_bounds && any) {
+        float r = 0;
+        for (int k = 0; k < 3; k++) {
+            sc.center[k] = (lo[k] + hi[k]) * 0.5f;
+            r = std::max(r, (hi[k] - lo[k]) * 0.5f);
+        }
+        sc.radius = r > 1e-5f ? r : 1.0f;
+    }
+}
+
 // ------------------------------------------------------------------ camera
 struct Camera {
     float yaw = 0.7f, pitch = 0.35f, dist = 2.2f;
@@ -427,6 +472,13 @@ int run_app() {
     int force_section = -1;      // when >=0, force the tab bar to this section
     int model_sel = -1;          // -1 = every model in the file
     bool rebuild_scene = false;
+    // animation playback
+    int anim_sel = -1;           // index into current.motions, -1 = bind pose
+    float anim_frame = 0.0f;
+    bool anim_playing = false;
+    double anim_last_time = 0.0;
+    std::vector<int> anim_applicable;   // motions valid for the current model
+    bool anim_dirty = false;     // re-pose next frame
     bool wireframe = false, lighting = true, textured = true, show_textures = false;
     bool show_settings = false;
     bool show_setup = index.entries().empty();
@@ -488,11 +540,28 @@ int run_app() {
                 if (model_sel < 0 && current.models.size() > 1) model_sel = 0;
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
+                // set up animation: which motions apply to this model?
+                anim_sel = -1;
+                anim_frame = 0.0f;
+                anim_playing = false;
+                anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
+                // debug hooks: SA2VIEWER_ANIM = index into applicable list,
+                // SA2VIEWER_ANIMFRAME = frame number
+                std::string ea = get_env("SA2VIEWER_ANIM");
+                if (!ea.empty() && !anim_applicable.empty()) {
+                    int ai = atoi(ea.c_str());
+                    if (ai >= 0 && ai < (int)anim_applicable.size()) {
+                        anim_sel = anim_applicable[ai];
+                        std::string ef = get_env("SA2VIEWER_ANIMFRAME");
+                        anim_frame = ef.empty() ? 0.0f : (float)atof(ef.c_str());
+                        anim_dirty = true;
+                    }
+                }
                 char buf[256];
                 snprintf(buf, sizeof buf,
                          "%s: %d tris, %d textures, %d anims",
                          e.display_name.c_str(), (int)scene.tris,
-                         (int)scene.textures.size(), (int)current.motions.size());
+                         (int)scene.textures.size(), (int)anim_applicable.size());
                 status = buf;
             } else {
                 status = "Could not open " + e.display_name + " - " + err;
@@ -502,7 +571,43 @@ int run_app() {
         if (rebuild_scene) {
             scene_from_asset(current, scene, scene.title, model_sel);
             cam = Camera();
+            anim_sel = -1;
+            anim_playing = false;
+            anim_frame = 0.0f;
+            anim_applicable = current.motions_for(model_sel < 0 ? 0 : model_sel);
             rebuild_scene = false;
+        }
+
+        // advance playback, then re-pose the mesh if the animation frame changed
+        if (anim_playing && anim_sel >= 0 && anim_sel < (int)current.motions.size()) {
+            double now = glfwGetTime();
+            double dt = (anim_last_time > 0.0) ? (now - anim_last_time) : 0.0;
+            anim_last_time = now;
+            int fc = current.motions[anim_sel].frame_count;
+            if (fc > 1) {
+                anim_frame += (float)(dt * 30.0);   // SA2 motions run at ~30 fps
+                while (anim_frame >= (float)fc) anim_frame -= (float)fc;
+            }
+            anim_dirty = true;
+        } else {
+            anim_last_time = 0.0;
+        }
+        if (anim_dirty) {
+            int mi = (model_sel < 0) ? 0 : model_sel;
+            if (mi >= 0 && mi < (int)current.models.size()) {
+                if (anim_sel >= 0 && anim_sel < (int)current.motions.size() &&
+                    !current.anim_data.empty() && mi < (int)current.model_roots.size()) {
+                    NinjaBlob blob(current.anim_data, 0, true);
+                    Model posed;
+                    if (blob.build_model_posed(current.model_roots[mi],
+                                               &current.motions[anim_sel], anim_frame,
+                                               posed))
+                        scene_geometry_from_model(posed, scene, false);
+                } else {
+                    scene_geometry_from_model(current.models[mi], scene, false);
+                }
+            }
+            anim_dirty = false;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -765,11 +870,45 @@ int run_app() {
             }
             ImGui::EndChild();
         }
-        if (!scene.anim_names.empty()) {
+        if (!anim_applicable.empty()) {
             ImGui::Separator();
-            ImGui::TextUnformatted("Animations");
-            ImGui::BeginChild("anims", ImVec2(0, 200 * cfg.ui_scale));
-            for (auto& a : scene.anim_names) ImGui::TextUnformatted(a.c_str());
+            ImGui::Text("Animation (%d)", (int)anim_applicable.size());
+            // play / pause / stop
+            if (ImGui::Button(anim_playing ? "Pause" : "Play")) {
+                if (anim_sel < 0 && !anim_applicable.empty()) {
+                    anim_sel = anim_applicable[0];
+                    anim_dirty = true;
+                }
+                anim_playing = !anim_playing;
+                anim_last_time = 0.0;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Bind pose")) {
+                anim_sel = -1; anim_playing = false; anim_frame = 0.0f;
+                anim_dirty = true;
+            }
+            // frame scrubber
+            if (anim_sel >= 0 && anim_sel < (int)current.motions.size()) {
+                int fc = current.motions[anim_sel].frame_count;
+                if (ImGui::SliderFloat("Frame", &anim_frame, 0.0f,
+                                       (float)std::max(1, fc - 1), "%.0f")) {
+                    anim_playing = false;
+                    anim_dirty = true;
+                }
+            }
+            ImGui::BeginChild("anims", ImVec2(0, 180 * cfg.ui_scale));
+            for (int ai : anim_applicable) {
+                const auto& mo = current.motions[ai];
+                char lbl[96];
+                snprintf(lbl, sizeof lbl, "%s (%d f)", mo.name.c_str(), mo.frame_count);
+                if (ImGui::Selectable(lbl, ai == anim_sel)) {
+                    anim_sel = ai;
+                    anim_frame = 0.0f;
+                    anim_playing = true;
+                    anim_last_time = 0.0;
+                    anim_dirty = true;
+                }
+            }
             ImGui::EndChild();
         }
         ImGui::End();

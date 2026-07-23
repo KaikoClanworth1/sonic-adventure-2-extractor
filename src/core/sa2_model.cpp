@@ -396,10 +396,79 @@ struct CacheSlot {
     bool live = false;
 };
 
+int NinjaBlob::count_animated(uint32_t root) const {
+    auto nodes = read_tree(root);
+    int n = 0;
+    for (const auto& nd : nodes) if (!(nd.flags & 0x40)) n++;
+    return n;
+}
+
+// Linear-interpolate a Key3 track at `frame`.
+static void lerp_track(const std::vector<Key3>& keys, float frame, float out[3]) {
+    if (keys.empty()) return;
+    if (frame <= keys.front().frame) {
+        memcpy(out, keys.front().v, sizeof(float) * 3); return;
+    }
+    if (frame >= keys.back().frame) {
+        memcpy(out, keys.back().v, sizeof(float) * 3); return;
+    }
+    for (size_t i = 1; i < keys.size(); i++) {
+        if (frame <= keys[i].frame) {
+            const Key3& a = keys[i - 1];
+            const Key3& b = keys[i];
+            float t = (b.frame != a.frame)
+                          ? (frame - a.frame) / (float)(b.frame - a.frame) : 0.0f;
+            for (int k = 0; k < 3; k++) out[k] = a.v[k] + (b.v[k] - a.v[k]) * t;
+            return;
+        }
+    }
+    memcpy(out, keys.back().v, sizeof(float) * 3);
+}
+
 bool NinjaBlob::build_model(uint32_t root, Model& out) const {
+    return build_model_posed(root, nullptr, 0.0f, out);
+}
+
+bool NinjaBlob::build_model_posed(uint32_t root, const Motion* motion, float frame,
+                                  Model& out) const {
     out.nodes = read_tree(root);
     out.parts.clear();
     if (out.nodes.empty()) return false;
+
+    // Apply the motion: for each animated node (those without NoAnimate 0x40, in
+    // tree order), replace its local translation/rotation with the interpolated
+    // keyframe, then recompute every node's world matrix.
+    if (motion && !motion->channels.empty()) {
+        std::vector<int> anim;
+        for (int i = 0; i < (int)out.nodes.size(); i++)
+            if (!(out.nodes[i].flags & 0x40)) anim.push_back(i);
+        for (int ai = 0; ai < (int)anim.size(); ai++) {
+            auto it = motion->channels.find(ai);
+            if (it == motion->channels.end()) continue;
+            Node& nd = out.nodes[anim[ai]];
+            const MotionChannel& ch = it->second;
+            if (!ch.pos.empty()) {
+                float p[3]; lerp_track(ch.pos, frame, p);
+                nd.pos[0] = p[0]; nd.pos[1] = p[1]; nd.pos[2] = p[2];
+            }
+            if (!ch.rot.empty()) {
+                float r[3]; lerp_track(ch.rot, frame, r);   // radians
+                for (int k = 0; k < 3; k++)
+                    nd.rot[k] = (int32_t)lroundf(r[k] / kBams);
+            }
+            if (!ch.scale.empty()) {
+                float s[3]; lerp_track(ch.scale, frame, s);
+                nd.scale[0] = s[0]; nd.scale[1] = s[1]; nd.scale[2] = s[2];
+            }
+        }
+        // recompute world matrices (parents precede children in read_tree order)
+        for (auto& nd : out.nodes) {
+            float local[16];
+            mat_from_srt(nd.pos, nd.rot, nd.scale, (nd.flags & 0x20) != 0, local);
+            if (nd.parent < 0) memcpy(nd.world, local, sizeof(local));
+            else mat_mul(local, out.nodes[nd.parent].world, nd.world);
+        }
+    }
 
     // Build child lists (read_tree records parent indices).
     std::vector<std::vector<int>> children(out.nodes.size());

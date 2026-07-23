@@ -462,20 +462,29 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         auto table = read_mdl_table(data.data(), data.size());
         if (table.empty()) return fail("no model table");
         NinjaBlob blob(data, 0, true);
+        // build every model, remembering its root and animated-node count
+        struct Built { Model m; uint32_t root; int anim; };
+        std::vector<Built> built;
         for (auto& kv : table) {
             Model m;
             if (blob.build_model(kv.second, m)) {
                 m.name = "model_" + std::to_string(kv.first);
-                out.models.push_back(std::move(m));
+                built.push_back({std::move(m), kv.second, blob.count_animated(kv.second)});
             }
         }
-        // matching motions: sonicmdl.prs -> sonicmtn.prs
+        if (built.empty()) return fail("no models decoded");
+        // The MDL table's first file entry is often a partial sub-model. Put the
+        // fullest animatable model (matches a motion's node count, most tris)
+        // first so the viewer shows a complete, poseable character by default.
         std::string mtn = sibling(e.path, "mdl.prs", "mtn.prs");
+        int want_nodes = -1;
         if (!mtn.empty()) {
             auto md = load_file(mtn);
             if (!md.empty()) {
                 NinjaBlob mb(md, 0, true);
-                for (auto& me : read_mtn_table(md.data(), md.size())) {
+                auto mtab = read_mtn_table(md.data(), md.size());
+                if (!mtab.empty()) want_nodes = mtab[0].node_count;
+                for (auto& me : mtab) {
                     Motion mo;
                     if (mb.read_motion(me.ptr, me.node_count, mo)) {
                         mo.name = "anim_" + std::to_string(me.index);
@@ -484,10 +493,22 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
                 }
             }
         }
+        std::stable_sort(built.begin(), built.end(),
+            [&](const Built& a, const Built& b) {
+                bool am = (a.anim == want_nodes), bm = (b.anim == want_nodes);
+                if (am != bm) return am;                     // animatable first
+                return a.m.triangle_count() > b.m.triangle_count();  // then detail
+            });
+        out.anim_data = data;
+        for (auto& bd : built) {
+            out.model_roots.push_back(bd.root);
+            out.model_anim_count.push_back(bd.anim);
+            out.models.push_back(std::move(bd.m));
+        }
         // textures: sonicmdl.prs -> sonictex.prs
         std::string tex = sibling(e.path, "mdl.prs", "tex.prs");
         if (!tex.empty()) load_textures(tex, out.textures);
-        return !out.models.empty() ? true : fail("no models decoded");
+        return true;
     }
 
     if (e.kind == AssetKind::CharacterMotion) {
