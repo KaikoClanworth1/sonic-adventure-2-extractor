@@ -320,11 +320,29 @@ static void set_lookat(const float eye[3], const float ctr[3]) {
 
 static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
                        bool wireframe, bool lighting, bool textured,
-                       bool force_two_sided, bool show_objects) {
+                       bool force_two_sided, bool show_objects, bool sky) {
     glViewport(0, 0, w, h);
     glClearColor(0.10f, 0.11f, 0.14f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (sc.parts.empty()) return;
+
+    // Optional sky-gradient backdrop so a map sits against a sky instead of the
+    // black void. (SA2's real per-stage skyboxes are objects wired up by the
+    // stage's compiled setup code, not shipped as loadable geometry.)
+    if (sky) {
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_TEXTURE_2D);
+        glBegin(GL_QUADS);
+        glColor3f(0.24f, 0.42f, 0.78f); glVertex2f(-1.f, 1.f); glVertex2f(1.f, 1.f);
+        glColor3f(0.70f, 0.82f, 0.93f); glVertex2f(1.f, -1.f); glVertex2f(-1.f, -1.f);
+        glEnd();
+        glEnable(GL_DEPTH_TEST);
+        glMatrixMode(GL_PROJECTION); glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);  glPopMatrix();
+    }
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -571,6 +589,7 @@ int run_app() {
     bool show_backfaces = true;
     bool show_objects = false;   // overlay a stage's placed-object markers
     int object_sel = -1;         // highlighted object row
+    bool sky_background = false;  // sky-gradient backdrop (auto-on for maps)
     bool show_settings = false;
     bool show_setup = index.entries().empty();
     char path_buf[512]{};
@@ -635,6 +654,7 @@ int run_app() {
                 // map has one, so its objects/NPCs are visible on load
                 build_object_markers(current.objects, scene.radius, scene);
                 show_objects = !current.objects.empty();
+                sky_background = !current.objects.empty();   // maps get a sky
                 object_sel = -1;
                 // SA2VIEWER_OBJ=<index>: focus the camera on an object (zoom-to test)
                 std::string eobj = get_env("SA2VIEWER_OBJ");
@@ -945,6 +965,11 @@ int run_app() {
                                   "places in this map. (SA2 keeps the object models\n"
                                   "themselves in sonic2app.exe, not in the game data.)");
         }
+        ImGui::Checkbox("Sky background", &sky_background);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Draw a sky-gradient backdrop instead of the black void.\n"
+                              "SA2's real per-stage skyboxes are compiled into the\n"
+                              "stage code, so this is a stand-in sky, not the original.");
         ImGui::Separator();
         if (current.models.size() > 1) {
             ImGui::Separator();
@@ -1125,7 +1150,7 @@ int run_app() {
 
         ImGui::Render();
         draw_scene(scene, cam, dw, dh, wireframe, lighting, textured, show_backfaces,
-                   show_objects);
+                   show_objects, sky_background);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         frame++;
