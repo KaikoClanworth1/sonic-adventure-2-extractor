@@ -26,33 +26,28 @@ vcount = len(verts)
 vend = o
 print(f"vertex block 0x{VBLK:x}: {vcount} verts, ends 0x{vend:x}")
 
-# index data starts after the per-mesh header; find the first run of >=6 valid
-# in-range u16 (that's the strip), collect the u16s until a run of invalids.
+# Index data is a run of triangle groups: {s16 triCount, |triCount|*3 u16};
+# negative count = reversed winding (like Ninja strips).
+be16s = lambda o: struct.unpack_from(">h", d, o)[0]
 ISTART = int(sys.argv[4], 0) if len(sys.argv) > 4 else vend
-idx = []
-o = ISTART
-bad = 0
-while o + 2 <= min(IEND, n):
-    v = be16(o)
-    if v < vcount:
-        idx.append(v); bad = 0
-    else:
-        idx.append(-1); bad += 1
-        if bad > 8 and len(idx) > 30: break   # end of this strip block
-    o += 2
-# triangle STRIP: -1 marks a restart; skip degenerate triangles; flip odd winding
 tris = []
-run = []
-for v in idx + [-1]:
-    if v < 0:
-        for k in range(len(run) - 2):
-            a, b, c = run[k], run[k+1], run[k+2]
-            if k % 2 == 1: a, b = b, a
-            if len({a, b, c}) == 3: tris.append((a, b, c))
-        run = []
-    else:
-        run.append(v)
-print(f"triangles (strip interp): {len(tris)} from {len(idx)} u16 at 0x{ISTART:x}")
+o = ISTART
+groups = 0
+while o + 2 <= min(IEND, n):
+    sc = be16s(o); o += 2
+    cnt = abs(sc)
+    if cnt == 0 or cnt > 4096 or o + cnt * 6 > n:
+        break
+    ok = True
+    grp = []
+    for t in range(cnt):
+        a, b, c = be16(o), be16(o + 2), be16(o + 4); o += 6
+        if a >= vcount or b >= vcount or c >= vcount: ok = False; break
+        if sc < 0: a, b = b, a
+        if len({a, b, c}) == 3: grp.append((a, b, c))
+    if not ok: break
+    tris += grp; groups += 1
+print(f"triangles: {len(tris)} in {groups} groups, ends 0x{o:x}")
 
 with open(r"F:\ClaudeProjects\Sonic Adventure 2\build\chao_m.obj", "w") as fh:
     for (x, y, z) in verts:
