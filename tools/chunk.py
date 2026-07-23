@@ -55,16 +55,19 @@ HAS_NORMAL = {33, 41, 42, 43, 44, 45, 46, 47}
 
 
 class Vertex:
-    __slots__ = ("pos", "normal", "diffuse", "weight", "node_index", "cache_index")
+    __slots__ = ("pos", "normal", "diffuse", "weight", "node_index",
+                 "cache_index", "weight_status", "ninja_flags")
 
     def __init__(self, pos, normal=None, diffuse=None, weight=1.0,
-                 node_index=0, cache_index=0):
+                 node_index=0, cache_index=0, weight_status=0, ninja_flags=0):
         self.pos = pos
         self.normal = normal
         self.diffuse = diffuse
         self.weight = weight
         self.node_index = node_index
         self.cache_index = cache_index
+        self.weight_status = weight_status   # chunk flag & 3: 0 none, 1/2/3 skin
+        self.ninja_flags = ninja_flags       # type-44 trailing u32
 
 
 class Strip:
@@ -161,6 +164,7 @@ def parse_vertex_chunks(data, off, limit=None):
             pz = _f32_from_u32(_u32be(data, vo + 8))
             v = Vertex((px, py, pz))
             v.cache_index = index_offset + i
+            v.weight_status = weight_status
             if head in (32, 33) and stride >= 4:
                 # weighted (skin) vertex: word 3 packs node index + weight
                 w4 = _u32be(data, vo + 12)

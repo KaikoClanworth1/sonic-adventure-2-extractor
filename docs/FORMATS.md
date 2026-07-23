@@ -204,13 +204,30 @@ that many `u16` indices, each optionally trailed by a `s16` UV pair
 Strip counts, indices and UVs must all be bounded by the chunk's declared size,
 or a corrupt chunk will read megabytes of garbage.
 
-### The vertex cache is shared across the whole node tree
+### The vertex cache, weighted skinning, and the pre/post-order split
 
-This is the part that is easy to get wrong. A vertex chunk writes into a single
-cache at `indexOffset`, and a node's polygon chunks may index vertices uploaded by
-an **ancestor** node. So the tree must be walked once, depth-first, transforming
-each node's vertices into model space as they are written. Parsing each attach in
-isolation loses geometry and produces dangling indices.
+This is the part that is easy to get wrong, and it took a full second pass to get
+right. A vertex chunk writes into a single cache shared across the whole tree, at
+`indexOffset`, and a node's polygon chunks may index vertices uploaded by a
+**different** node.
+
+SA2 characters are **skinned**: the arms, legs and torso blend between bones. The
+mechanism:
+
+* Weighted vertex types are **37** (`VertexNinjaFlags`) and **44**
+  (`VertexNormalNinjaFlags`) — *not* the SH types. The trailing "ninja flags" u32
+  packs the **cache index** in bits 0-15 and the **weight/255** in bits 16-23.
+* Each vertex chunk has a **WeightStatus** (`flags & 3`): **0 = Start** (replace
+  the cache slot), **1 = Middle** / **2 = End** (add to it). A skinned vertex ends
+  up as `Σ weightₖ · (worldMatrixₖ · localPosₖ)`, divided by `Σ weightₖ`.
+* **Vertices are processed pre-order (descending the tree); polygons are processed
+  post-order (after a node's children).** A skinned mesh stores its polygon on a
+  container node while the deforming vertices live on the child bones, so the
+  polygon must be read only after those children have written to the cache.
+  Reading polygons in plain pre-order scatters every skinned limb; reading all
+  vertices first and then all polygons corrupts the rigid meshes that reuse low
+  cache slots. The pre-order-vertices / post-order-polygons split is what makes
+  both work. (See `tools/skinning_reference.py`.)
 
 ---
 

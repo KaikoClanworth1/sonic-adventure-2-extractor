@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <unordered_map>
 
@@ -193,11 +194,23 @@ bool NinjaBlob::valid_attach(uint32_t ptr) const {
 }
 
 // ------------------------------------------------------------ chunk parsing
+static bool chunk_is_weighted(int t) { return t == 37 || t == 44; }
+
+// One vertex read out of a vertex chunk, still in the node's local space.
 struct CVert {
     float pos[3];
     float nrm[3];
     bool has_nrm = false;
     uint32_t diffuse = 0xFFFFFFFFu;
+    int cache_index = 0;
+    float weight = 1.0f;
+};
+
+// A vertex chunk carries a WeightStatus (0=Start replace, 1=Middle add,
+// 2=End add) shared by all its vertices.
+struct VChunk {
+    int status = 0;
+    std::vector<CVert> verts;
 };
 
 struct CStrip {
@@ -213,9 +226,11 @@ struct CPoly {
     bool use_alpha = false;
 };
 
-// Parse a vertex chunk stream into cache-index -> vertex.
+// Parse a vertex chunk stream into a list of chunks, preserving weight status
+// and, for weighted types (37/44), the per-vertex cache index and skin weight
+// packed into the trailing "ninja flags" word.
 static void parse_vertices(const NinjaBlob& b, size_t off,
-                           std::unordered_map<int, CVert>& out) {
+                           std::vector<VChunk>& out) {
     size_t n = b.size();
     for (int guard = 0; guard < 4096; guard++) {
         if (off + 4 > n) return;
@@ -235,6 +250,10 @@ static void parse_vertices(const NinjaBlob& b, size_t off,
         // the index header, so the payload is (size - 1) words. Deriving the
         // stride from the chunk is self-validating and beats a hardcoded table.
         int stride = (nb > 0 && size >= 1) ? (size - 1) / nb : fallback_stride(head);
+        bool weighted = chunk_is_weighted(head);
+        bool has_nrm = chunk_has_normal(head);
+        VChunk vc;
+        vc.status = (int)((w >> 8) & 3);   // WeightStatus = flag & 3
         if (stride >= 3 && nb > 0) {
             size_t payload_end = body + (size_t)(size - 1) * 4;
             for (int i = 0; i < nb; i++) {
@@ -244,7 +263,7 @@ static void parse_vertices(const NinjaBlob& b, size_t off,
                 v.pos[0] = b.f32(vo);
                 v.pos[1] = b.f32(vo + 4);
                 v.pos[2] = b.f32(vo + 8);
-                if (chunk_has_normal(head) && stride >= 6) {
+                if (has_nrm && stride >= 6) {
                     size_t no = vo + (head == 33 ? 16 : 12);
                     if (no + 12 <= n) {
                         v.nrm[0] = b.f32(no);
@@ -256,9 +275,21 @@ static void parse_vertices(const NinjaBlob& b, size_t off,
                 } else if (head == 35 && stride >= 4) {
                     v.diffuse = b.u32(vo + 12);
                 }
-                out[index_off + i] = v;
+                if (weighted) {
+                    // ninja flags word: after pos (+ normal). bits 0-15 = cache
+                    // index, bits 16-23 = weight / 255.
+                    size_t fo = vo + (has_nrm ? 24 : 12);
+                    uint32_t nf = (fo + 4 <= n) ? b.u32(fo) : 0;
+                    v.cache_index = index_off + (int)(nf & 0xFFFF);
+                    v.weight = ((nf >> 16) & 0xFF) / 255.0f;
+                } else {
+                    v.cache_index = index_off + i;
+                    v.weight = 1.0f;
+                }
+                vc.verts.push_back(v);
             }
         }
+        out.push_back(std::move(vc));
         off += 4 + (size_t)size * 4;
     }
 }
@@ -352,42 +383,79 @@ static void parse_polys(const NinjaBlob& b, size_t off, std::vector<CPoly>& out)
 }
 
 // ------------------------------------------------------------ build
+// One accumulator slot in the shared vertex cache. SA2 characters are skinned:
+// a slot blends contributions from several bones. Start replaces the slot,
+// Middle/End add; the final vertex is the weighted sum divided by the weight sum.
+struct CacheSlot {
+    float pos[3]{0, 0, 0};
+    float nrm[3]{0, 1, 0};
+    float wsum = 0.0f;
+    float best_w = -1.0f;
+    int node = 0;
+    uint32_t diffuse = 0xFFFFFFFFu;
+    bool live = false;
+};
+
 bool NinjaBlob::build_model(uint32_t root, Model& out) const {
     out.nodes = read_tree(root);
     out.parts.clear();
     if (out.nodes.empty()) return false;
 
-    // Chunk models share ONE vertex cache across the whole tree: a node's poly
-    // chunks may index vertices uploaded by an ancestor. Walk once, in order.
-    std::unordered_map<int, CVert> cache;
-    std::unordered_map<int, int> cache_node;   // cache index -> node index
+    // Build child lists (read_tree records parent indices).
+    std::vector<std::vector<int>> children(out.nodes.size());
+    std::vector<int> roots;
+    for (int i = 0; i < (int)out.nodes.size(); i++) {
+        int p = out.nodes[i].parent;
+        if (p >= 0 && p < (int)out.nodes.size()) children[p].push_back(i);
+        else roots.push_back(i);
+    }
 
-    for (const auto& nd : out.nodes) {
-        if (!valid_attach(nd.attach_ptr)) continue;
-        size_t a = off(nd.attach_ptr);
-        uint32_t vl = u32(a), pl = u32(a + 4);
+    std::vector<CacheSlot> cache(0x10000);
 
-        if (ok(vl)) {
-            std::unordered_map<int, CVert> local;
-            parse_vertices(*this, off(vl), local);
-            for (auto& kv : local) {
-                CVert v = kv.second;
+    auto accumulate = [&](const Node& nd) {
+        if (!valid_attach(nd.attach_ptr)) return;
+        uint32_t vl = u32(off(nd.attach_ptr));
+        if (!ok(vl)) return;
+        std::vector<VChunk> chunks;
+        parse_vertices(*this, off(vl), chunks);
+        for (auto& vc : chunks) {
+            for (auto& v : vc.verts) {
+                if (v.cache_index < 0 || v.cache_index >= (int)cache.size()) continue;
                 float p[3];
                 xform_point(nd.world, v.pos, p);
-                memcpy(v.pos, p, sizeof(p));
-                if (v.has_nrm) {
-                    float d[3];
-                    xform_dir(nd.world, v.nrm, d);
-                    float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-                    if (len > 1e-8f) { d[0] /= len; d[1] /= len; d[2] /= len; }
-                    memcpy(v.nrm, d, sizeof(d));
+                float d[3] = {0, 0, 0};
+                if (v.has_nrm) xform_dir(nd.world, v.nrm, d);
+                CacheSlot& s = cache[v.cache_index];
+                if (vc.status == 0 || !s.live) {   // Start: replace
+                    s.pos[0] = p[0] * v.weight;
+                    s.pos[1] = p[1] * v.weight;
+                    s.pos[2] = p[2] * v.weight;
+                    s.nrm[0] = d[0] * v.weight;
+                    s.nrm[1] = d[1] * v.weight;
+                    s.nrm[2] = d[2] * v.weight;
+                    s.wsum = v.weight;
+                    s.best_w = v.weight;
+                    s.node = nd.index;
+                    s.diffuse = v.diffuse;
+                    s.live = true;
+                } else {                           // Middle/End: add
+                    s.pos[0] += p[0] * v.weight;
+                    s.pos[1] += p[1] * v.weight;
+                    s.pos[2] += p[2] * v.weight;
+                    s.nrm[0] += d[0] * v.weight;
+                    s.nrm[1] += d[1] * v.weight;
+                    s.nrm[2] += d[2] * v.weight;
+                    s.wsum += v.weight;
+                    if (v.weight > s.best_w) { s.best_w = v.weight; s.node = nd.index; }
                 }
-                cache[kv.first] = v;
-                cache_node[kv.first] = nd.index;
             }
         }
-        if (!ok(pl)) continue;
+    };
 
+    auto read_polys = [&](const Node& nd) {
+        if (!valid_attach(nd.attach_ptr)) return;
+        uint32_t pl = u32(off(nd.attach_ptr) + 4);
+        if (!ok(pl)) return;
         std::vector<CPoly> polys;
         parse_polys(*this, off(pl), polys);
         for (auto& poly : polys) {
@@ -398,7 +466,6 @@ bool NinjaBlob::build_model(uint32_t root, Model& out) const {
             part.use_alpha = poly.use_alpha;
             part.diffuse = poly.diffuse;
             std::map<std::pair<int, uint64_t>, uint32_t> remap;
-
             for (auto& st : poly.strips) {
                 size_t cnt = st.idx.size();
                 bool has_uv = st.uv.size() >= cnt * 2;
@@ -407,40 +474,38 @@ bool NinjaBlob::build_model(uint32_t root, Model& out) const {
                     int tuv[3] = {(int)k, (int)k + 1, (int)k + 2};
                     bool flip = (k % 2 == 1);
                     if (st.reversed) flip = !flip;
-                    if (flip) {
-                        std::swap(tri[0], tri[1]);
-                        std::swap(tuv[0], tuv[1]);
-                    }
+                    if (flip) { std::swap(tri[0], tri[1]); std::swap(tuv[0], tuv[1]); }
                     if (tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2])
                         continue;
                     uint32_t vi[3];
                     bool good = true;
                     for (int c = 0; c < 3; c++) {
-                        auto it = cache.find(tri[c]);
-                        if (it == cache.end()) { good = false; break; }
+                        int ci = tri[c];
+                        if (ci < 0 || ci >= (int)cache.size() || !cache[ci].live) {
+                            good = false; break;
+                        }
+                        const CacheSlot& s = cache[ci];
+                        float inv = (s.wsum != 0.0f) ? 1.0f / s.wsum : 1.0f;
                         float u = 0, v = 0;
                         if (has_uv) { u = st.uv[tuv[c] * 2]; v = st.uv[tuv[c] * 2 + 1]; }
                         uint64_t uvkey = ((uint64_t)(int32_t)(u * 4096.0f) << 32) ^
                                          (uint32_t)(int32_t)(v * 4096.0f);
-                        auto key = std::make_pair(tri[c], uvkey);
+                        auto key = std::make_pair(ci, uvkey);
                         auto rit = remap.find(key);
                         if (rit != remap.end()) { vi[c] = rit->second; continue; }
                         uint32_t ni = (uint32_t)(part.positions.size() / 3);
                         remap[key] = ni;
-                        const CVert& cv = it->second;
                         part.positions.insert(part.positions.end(),
-                                              {cv.pos[0], cv.pos[1], cv.pos[2]});
-                        if (cv.has_nrm)
-                            part.normals.insert(part.normals.end(),
-                                                {cv.nrm[0], cv.nrm[1], cv.nrm[2]});
-                        else
-                            part.normals.insert(part.normals.end(), {0.0f, 1.0f, 0.0f});
+                                              {s.pos[0] * inv, s.pos[1] * inv, s.pos[2] * inv});
+                        float nx = s.nrm[0] * inv, ny = s.nrm[1] * inv, nz = s.nrm[2] * inv;
+                        float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+                        if (nl > 1e-8f) { nx /= nl; ny /= nl; nz /= nl; }
+                        else { nx = 0; ny = 1; nz = 0; }
+                        part.normals.insert(part.normals.end(), {nx, ny, nz});
                         part.uvs.push_back(u);
                         part.uvs.push_back(v);
-                        part.colors.push_back(cv.diffuse);
-                        auto cn = cache_node.find(tri[c]);
-                        part.vertex_node.push_back(cn == cache_node.end() ? nd.index
-                                                                         : cn->second);
+                        part.colors.push_back(s.diffuse);
+                        part.vertex_node.push_back(s.node);
                         vi[c] = ni;
                     }
                     if (!good) continue;
@@ -449,7 +514,18 @@ bool NinjaBlob::build_model(uint32_t root, Model& out) const {
             }
             if (!part.indices.empty()) out.parts.push_back(std::move(part));
         }
-    }
+    };
+
+    // Vertices process in pre-order (descending); polygons in post-order (after
+    // a node's children). A skinned mesh stores its polygon on a container node
+    // while the deforming vertices live on child bones, so the polygon must be
+    // read only after those children have written to the cache.
+    std::function<void(int)> visit = [&](int i) {
+        accumulate(out.nodes[i]);
+        for (int c : children[i]) visit(c);
+        read_polys(out.nodes[i]);
+    };
+    for (int r : roots) visit(r);
     return !out.parts.empty();
 }
 

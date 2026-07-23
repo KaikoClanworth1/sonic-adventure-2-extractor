@@ -160,9 +160,11 @@ Other limits:
 * **Character animations are matched by exact filename** — `sonicmdl.prs` picks up
   `sonicmtn.prs`, but variants like `bknuckmdl.prs` have no same-named `*mtn.prs`
   and export with no actions.
-* **Character skinning is rigid** — each mesh is bound to the node that owns it,
-  which is how the game itself works (Dreamcast-era segmented characters).
 * Audio, video and message tables are indexed and classified but not decoded.
+
+Character models use SA2's **cached weighted skinning** (the arms, legs and torso
+blend between bones). Each vertex is baked to its bind-pose world position; the
+FBX binds it to its dominant bone, so the mesh is solid and correctly shaped.
 
 ## Format notes
 
