@@ -27,6 +27,7 @@ const char* kind_name(AssetKind k) {
         case AssetKind::Level:           return "Level module";
         case AssetKind::Stage:           return "Stage geometry";
         case AssetKind::SetPlacement:    return "Object placement";
+        case AssetKind::ChaoStage:       return "Chao World stage";
         default:                         return "Data";
     }
 }
@@ -96,6 +97,9 @@ static AssetKind classify(const std::string& name_l, const std::string& rel_l) {
 
     bool in_event = rel_l.find("event") != std::string::npos;
     if (ends_with(name_l, ".prs")) {
+        // Chao World stages (ChaoStgLobby/Karate/Kinder... .prs) hold packed
+        // triangle-strip geometry, not a texture archive.
+        if (name_l.rfind("chaostg", 0) == 0) return AssetKind::ChaoStage;
         if (ends_with(name_l, "mdl.prs")) return AssetKind::CharacterModel;
         if (ends_with(name_l, "mtn.prs")) return AssetKind::CharacterMotion;
         if (name_l.find("texture") != std::string::npos && in_event)
@@ -181,6 +185,15 @@ static void assign_display(AssetEntry& e, const NameTable& names) {
             } else {
                 e.display_name = "Stage " + std::to_string(num);
             }
+            break;
+        }
+        case AssetKind::ChaoStage: {
+            e.section = Section::Maps;
+            // ChaoStgLobby.prs -> "Chao World: Lobby"
+            std::string stem = nl.substr(0, nl.size() - 4);          // drop .prs
+            std::string area = stem.size() > 7 ? stem.substr(7) : stem; // drop "chaostg"
+            if (!area.empty()) area[0] = (char)std::toupper((unsigned char)area[0]);
+            e.display_name = "Chao World: " + (area.empty() ? std::string("Stage") : area);
             break;
         }
         case AssetKind::CharacterModel:
@@ -499,6 +512,16 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
 
     auto data = load_file(e.path);
     if (data.empty()) return fail("could not read file");
+
+    // Chao World stage: packed triangle-strip geometry, world space.
+    if (e.kind == AssetKind::ChaoStage) {
+        Model m;
+        if (!load_chao_stage(data, m))
+            return fail("no Chao geometry (garden format not yet supported)");
+        m.name = e.name;
+        out.models.push_back(std::move(m));
+        return true;
+    }
 
     if (e.kind == AssetKind::CharacterModel) {
         auto table = read_mdl_table(data.data(), data.size());

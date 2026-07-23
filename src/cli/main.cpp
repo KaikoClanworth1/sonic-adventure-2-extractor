@@ -180,7 +180,8 @@ static AssetEntry entry_for(const char* path) {
         size_t n = strlen(s);
         return nl.size() >= n && nl.compare(nl.size() - n, n, s) == 0;
     };
-    if (ends("mdl.prs")) e.kind = AssetKind::CharacterModel;
+    if (nl.rfind("chaostg", 0) == 0 && ends(".prs")) e.kind = AssetKind::ChaoStage;
+    else if (ends("mdl.prs")) e.kind = AssetKind::CharacterModel;
     else if (ends("mtn.prs")) e.kind = AssetKind::CharacterMotion;
     else if (ends(".rel")) e.kind = AssetKind::Stage;
     else if (ends(".pak")) e.kind = AssetKind::PakArchive;

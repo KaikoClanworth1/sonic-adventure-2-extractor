@@ -370,7 +370,48 @@ Character names come from the model file prefix (`sonicmdl` -> Sonic,
 `milesmdl` -> Tails, `metalsonicmdl` -> Metal Sonic), and boss arenas from a
 small keyed table (`bigfoot` -> Big Foot, `last1` -> Biolizard).
 
-## 11. What is not implemented
+## 11. Chao World stage geometry (`ChaoStg*.prs`)
+
+The Chao World areas are not stage RELs with a LandTable; their geometry sits in
+`ChaoStg*.prs` (Lobby, Karate, Kinder, plus the gardens). Decompressed, these are
+big-endian with pointer base 0, and — unlike everything else — carry **no pointer
+tables at all**. The file is a packed stream of meshes:
+
+```
+[ ~44-byte material header, ending in a u16 group count ]
+[ group-count triangle-strip groups ]
+[ zero padding up to the vertex block's alignment ]
+[ 24-byte interleaved position+normal vertex block ]   (repeat per mesh)
+```
+
+A group is a **triangle strip**, GameCube display-list style: `{ s16 count,
+count corners }`, and **each corner is three u16s** `(positionIdx, normalIdx,
+uvIdx)`. A negative `count` reverses the strip winding. Only the position column
+is needed to triangulate; the vertex block it indexes has `maxPositionIndex + 1`
+entries and follows the strip data *after alignment padding* (blocks land on
+~0x400 boundaries, zero-filled in between — not flush against the indices). The
+material header's tail before the group count is a near-constant GX-flag
+signature (`?? 08 40 ??` then `?? 41 ?? ??`).
+
+Because there is no table, [`sa2_chao.cpp`](../src/core/sa2_chao.cpp) anchors on
+the geometry: it enumerates every maximal run of pos+normal vertices, scans for
+each candidate group count, strip-parses it, maps it to the vertex block that
+follows the padding (`isvert` under-counts blocks whose interior normals are a
+hair off unit length, so it allows a ~20 % shortfall and trusts the strip's index
+range), keeps the most-triangles parse per block, and drops incoherent parses
+with a median-edge-length filter. The structural meshes are already in world
+space (concentric tiers about the Y axis), so they merge directly. Validated in
+Blender against `ChaoStgLobby` (10 meshes / 1234 tris — the arched lobby building
++ platform); Karate and Kinder decode with minor heuristic artifacts.
+
+Two things are **not** solved: the **Hero/Dark gardens** (and Entrance) use a
+different, pos-only (stride-12) format with separate normal/UV arrays — the
+strip decoder finds nothing in them; and small-object **placement** lives in a
+scene graph at header `+0x24/+0x28` whose pointers are `0x80xxxxxx` GameCube RAM
+addresses spanning a larger loaded image, so it is not cleanly relocatable per
+file (small props therefore pile at the origin; the building itself is correct).
+
+## 12. What is not implemented
 
 * **Object/enemy models compiled into `sonic2app.exe`** (GC "Ginja" at absolute
   VAs, ImageBase 0x00400000) — the placement side is done, the model resolution

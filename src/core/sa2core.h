@@ -197,6 +197,14 @@ std::vector<LandTableInfo> find_landtables(const NinjaBlob& blob);
 // space). Collision-only COLs are skipped.
 bool build_landtable(const NinjaBlob& blob, const LandTableInfo& lt, Model& out);
 
+// ---------------------------------------------------------------- Chao stages
+// Decodes Chao World stage geometry (ChaoStgLobby/Karate/Kinder .prs, already
+// PRS-decompressed) into world-space meshes. These files pack triangle-strip
+// meshes with interleaved pos+normal vertex blocks and no pointer tables (see
+// src/core/sa2_chao.cpp). Returns false if no meshes decode (e.g. the Hero/Dark
+// gardens, which use a different pos-only format).
+bool load_chao_stage(const std::vector<uint8_t>& data, Model& out);
+
 // ---------------------------------------------------------------- SET / objects
 // One placed object from a SETxxxx_?.BIN file.
 struct SetObject {
@@ -240,7 +248,7 @@ std::vector<MtnEntry> read_mtn_table(const uint8_t* d, size_t n);
 enum class AssetKind {
     Unknown, TextureArchive, CharacterModel, CharacterMotion, EventScene,
     EventTexture, EventMotion, PakArchive, Texture, Audio, Video, Message, Level,
-    Stage, SetPlacement, ExeModel
+    Stage, SetPlacement, ExeModel, ChaoStage
 };
 const char* kind_name(AssetKind k);
 
