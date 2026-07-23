@@ -12,6 +12,7 @@
 //   SA2VIEWER_OPEN=<substring>       auto-select and load a matching asset
 #include <windows.h>
 #include <shlobj.h>
+#include <mmsystem.h>   // waveOut audio playback
 
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
@@ -486,6 +487,47 @@ static std::string get_env(const char* key) {
     return std::string();
 }
 
+// Minimal Windows waveOut player for a decoded AudioClip. Plays the whole clip
+// from a single buffer, which must outlive playback (we point at the loaded
+// asset's PCM and always stop() before that asset is replaced).
+struct AudioPlayer {
+    HWAVEOUT hwo = nullptr;
+    WAVEHDR hdr{};
+    bool playing = false;
+
+    void stop() {
+        if (hwo) {
+            waveOutReset(hwo);
+            if (hdr.dwFlags & WHDR_PREPARED)
+                waveOutUnprepareHeader(hwo, &hdr, sizeof(hdr));
+            waveOutClose(hwo);
+            hwo = nullptr;
+        }
+        hdr = WAVEHDR{};
+        playing = false;
+    }
+    void play(const AudioClip& c) {
+        stop();
+        if (!c.valid()) return;
+        WAVEFORMATEX wf{};
+        wf.wFormatTag = WAVE_FORMAT_PCM;
+        wf.nChannels = (WORD)c.channels;
+        wf.nSamplesPerSec = (DWORD)c.sample_rate;
+        wf.wBitsPerSample = 16;
+        wf.nBlockAlign = (WORD)(c.channels * 2);
+        wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
+        if (waveOutOpen(&hwo, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) !=
+            MMSYSERR_NOERROR) { hwo = nullptr; return; }
+        hdr = WAVEHDR{};
+        hdr.lpData = (LPSTR)c.pcm.data();
+        hdr.dwBufferLength = (DWORD)(c.pcm.size() * sizeof(int16_t));
+        waveOutPrepareHeader(hwo, &hdr, sizeof(hdr));
+        waveOutWrite(hwo, &hdr, sizeof(hdr));
+        playing = true;
+    }
+    bool finished() const { return playing && (hdr.dwFlags & WHDR_DONE); }
+};
+
 // Pick a sensible motion to auto-play on load: the applicable motion with the
 // most frames. The longest motion is a smooth loop rather than a 2-4 frame
 // flicker, and for the playable characters it is the in-place idle/wait cycle,
@@ -563,6 +605,7 @@ int run_app() {
     Scene scene;
     Camera cam;
     LoadedAsset current;
+    AudioPlayer player;
     char search_buf[256]{};
     int cur_section = (int)Section::Maps;
     std::vector<int> section_items;
@@ -643,6 +686,7 @@ int run_app() {
             LoadedAsset la;
             std::string err;
             if (load_asset(e, index, la, &err)) {
+                player.stop();   // release the old clip before it is freed
                 current = std::move(la);
                 // a single-model file needs no selector; multi-model files
                 // default to the first so parts do not stack at the origin
@@ -999,6 +1043,23 @@ int run_app() {
         ImGui::BulletText("triangles %d", (int)scene.tris);
         ImGui::BulletText("textures  %d", (int)scene.textures.size());
         ImGui::BulletText("anims     %d", (int)current.motions.size());
+        if (current.audio.valid()) {
+            ImGui::Separator();
+            ImGui::Text("Audio: %d Hz  %d ch  %.1f s", current.audio.sample_rate,
+                        current.audio.channels, current.audio.seconds());
+            bool on = player.playing && !player.finished();
+            if (on) { if (ImGui::Button("Stop ##aud")) player.stop(); }
+            else    { if (ImGui::Button("Play ##aud")) player.play(current.audio); }
+            ImGui::SameLine();
+            if (ImGui::Button("Export WAV")) {
+                std::error_code ec; fs::create_directories("exports", ec);
+                std::string stem = fs::path(current.source).stem().string();
+                if (stem.empty()) stem = "audio";
+                std::string out = "exports/" + stem + ".wav";
+                status = write_wav(out, current.audio) ? ("Wrote " + out)
+                                                       : std::string("WAV export failed");
+            }
+        }
         if (!current.objects.empty()) {
             ImGui::Separator();
             ImGui::Text("Objects in map (%d)", (int)current.objects.size());
@@ -1169,6 +1230,7 @@ int run_app() {
     }
 
     cfg.save();
+    player.stop();
     scene.reset();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

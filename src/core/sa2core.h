@@ -297,6 +297,21 @@ std::vector<uint8_t> read_file(const std::string& path);
 // Reads a file and PRS-decompresses it when it is compressed.
 std::vector<uint8_t> load_file(const std::string& path);
 
+// ---------------------------------------------------------------- audio (ADX)
+struct AudioClip {
+    int sample_rate = 0;
+    int channels = 0;
+    std::vector<int16_t> pcm;   // interleaved 16-bit signed
+    bool valid() const { return sample_rate > 0 && channels > 0 && !pcm.empty(); }
+    double seconds() const {
+        return channels ? (double)pcm.size() / channels / sample_rate : 0.0;
+    }
+};
+// Decode a CRI ADX (type 2/3/4, standard 2-coefficient ADPCM) into PCM16.
+bool decode_adx(const uint8_t* d, size_t n, AudioClip& out);
+// Write a 16-bit PCM WAV file.
+bool write_wav(const std::string& path, const AudioClip& clip);
+
 // Highest-level helper: pull every model (and, for characters, every motion)
 // out of one asset file.
 struct LoadedAsset {
@@ -308,6 +323,9 @@ struct LoadedAsset {
     // Placed objects for a loaded stage (parsed from its setNNNN_s.bin), in the
     // same world space as the stage geometry. Empty for non-stage assets.
     std::vector<SetObject> objects;
+
+    // Decoded audio, for ADX assets. Invalid for everything else.
+    AudioClip audio;
 
     // Re-pose context for animation playback: the decompressed model data, and
     // per-model the root pointer and animated-node count. The viewer rebuilds a

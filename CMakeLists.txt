@@ -103,6 +103,7 @@ target_link_libraries(sa2viewer PRIVATE
     sa2core
     "${GLFW_LIBRARY}"
     opengl32
+    winmm            # waveOut audio playback
 )
 set_target_properties(sa2viewer PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"

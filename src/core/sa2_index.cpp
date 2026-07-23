@@ -647,6 +647,12 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         return true;
     }
 
+    // ADX audio (magic 0x8000): decode to PCM for playback / WAV export.
+    if (data.size() >= 2 && data[0] == 0x80 && data[1] == 0x00) {
+        if (decode_adx(data.data(), data.size(), out.audio)) return true;
+        return fail("ADX decode failed");
+    }
+
     // Unknown: try every interpretation we have.
     if (data.size() >= 4 && memcmp(data.data(), "GVMH", 4) == 0)
         return gvm_extract(data.data(), data.size(), out.textures)

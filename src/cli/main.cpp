@@ -424,6 +424,19 @@ static int cmd_set(const char* path) {
     return 0;
 }
 
+static int cmd_wav(const char* path, const char* out) {
+    auto data = load_file(path);
+    if (data.empty()) { printf("cannot read %s\n", path); return 1; }
+    AudioClip clip;
+    if (!decode_adx(data.data(), data.size(), clip)) {
+        printf("not a decodable ADX file\n"); return 1;
+    }
+    if (!write_wav(out, clip)) { printf("could not write %s\n", out); return 1; }
+    printf("%s: %d Hz x%d, %.1f s -> %s\n", fs::path(path).filename().string().c_str(),
+           clip.sample_rate, clip.channels, clip.seconds(), out);
+    return 0;
+}
+
 static int cmd_regress(const char* game) {
     GameIndex idx;
     if (!idx.scan(game)) { printf("could not scan '%s'\n", game); return 1; }
@@ -571,6 +584,7 @@ int main(int argc, char** argv) {
         return cmd_fbx(argv[2], argv[3], argc >= 5 ? atoi(argv[4]) : 0);
     if (cmd == "stage" && argc >= 4)    return cmd_stage(argv[2], argv[3]);
     if (cmd == "set" && argc >= 3)      return cmd_set(argv[2]);
+    if (cmd == "wav" && argc >= 4)      return cmd_wav(argv[2], argv[3]);
     if (cmd == "regress" && argc >= 3)  return cmd_regress(argv[2]);
     if (cmd == "search" && argc >= 4)   return cmd_search(argv[2], argv[3]);
     if (cmd == "sections" && argc >= 3) return cmd_sections(argv[2]);

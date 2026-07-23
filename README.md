@@ -42,6 +42,9 @@ verified by a batch regression that runs every parser over every shipped file.
   `.materials.json` capturing each material's unlit / env-map / blend / diffuse
   state, and object placement as a scene JSON.
 * **Exports textures** as PNG.
+* **Plays and exports the music** — decodes SA2's CRI **ADX** audio
+  (`resource/gd_PC/ADX/*.adx`), with an in-app **Play** button and **Export WAV**
+  (`sa2cli wav in.adx out.wav`).
 * Persisted game-folder setting and a **UI scale slider** for high-DPI displays.
 
 ## Verified coverage
@@ -92,6 +95,7 @@ sa2cli fbx       <file> <out.fbx> [n] export model n (-1 = all merged)
 sa2cli stage     <stgXXD.rel> <dir>  export a stage: FBX + textures +
                                      Unity shader + material JSON + placement
 sa2cli set       <setXXXX_s.bin>     list placed objects
+sa2cli wav       <file.adx> <out.wav> decode CRI ADX music to a WAV
 sa2cli regress   <game>              batch-test every parser on every file
 ```
 
