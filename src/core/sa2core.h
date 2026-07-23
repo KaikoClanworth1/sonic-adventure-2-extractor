@@ -240,12 +240,12 @@ std::vector<MtnEntry> read_mtn_table(const uint8_t* d, size_t n);
 enum class AssetKind {
     Unknown, TextureArchive, CharacterModel, CharacterMotion, EventScene,
     EventTexture, EventMotion, PakArchive, Texture, Audio, Video, Message, Level,
-    Stage, SetPlacement
+    Stage, SetPlacement, ExeModel
 };
 const char* kind_name(AssetKind k);
 
 // User-facing sections shown as tabs in the viewer.
-enum class Section { Maps, Characters, Objects, Particles, Audio, Other, COUNT };
+enum class Section { Maps, Characters, Objects, Particles, Audio, Enemies, Other, COUNT };
 const char* section_name(Section s);
 
 struct AssetEntry {
@@ -258,6 +258,7 @@ struct AssetEntry {
     AssetKind kind = AssetKind::Unknown;
     Section section = Section::Other;
     bool compressed = false;   // PRS
+    uint32_t exe_root = 0;     // for ExeModel: the model root's virtual address
 };
 
 // Friendly names pulled from sonic2app.exe: stage number -> stage name (from the
@@ -283,10 +284,16 @@ public:
     std::vector<int> in_section(Section s, const std::string& query = "",
                                 int limit = 5000) const;
     int section_count(Section s) const;
+    // The flat virtual image of sonic2app.exe (empty if not found), so the viewer
+    // can build the ExeModel entries without re-reading the executable.
+    const std::vector<uint8_t>& exe_image() const { return exe_image_; }
+    uint32_t exe_base() const { return exe_base_; }
 private:
     std::string root_;
     std::vector<AssetEntry> entries_;
     NameTable names_;
+    std::vector<uint8_t> exe_image_;
+    uint32_t exe_base_ = 0;
 };
 
 // Tries to locate a Sonic Adventure 2 install (Steam library folders, common
@@ -311,6 +318,15 @@ struct AudioClip {
 bool decode_adx(const uint8_t* d, size_t n, AudioClip& out);
 // Write a 16-bit PCM WAV file.
 bool write_wav(const std::string& path, const AudioClip& clip);
+
+// ---------------------------------------------------------------- exe models
+// Build a flat virtual image from a PE (sonic2app.exe) so NinjaBlob(image, base,
+// /*be=*/false) can resolve the absolute virtual pointers of the little-endian
+// Ninja models compiled into the executable.
+bool load_pe_image(const std::string& path, std::vector<uint8_t>& image, uint32_t& base);
+// Embedded model roots with >= min_tris triangles, most-detailed first.
+std::vector<uint32_t> find_exe_models(const std::vector<uint8_t>& image, uint32_t base,
+                                      int min_tris, std::vector<int>* tri_counts);
 
 // Highest-level helper: pull every model (and, for characters, every motion)
 // out of one asset file.

@@ -424,6 +424,35 @@ static int cmd_set(const char* path) {
     return 0;
 }
 
+static int cmd_exemodels(const char* exe) {
+    std::vector<uint8_t> image; uint32_t base = 0;
+    if (!load_pe_image(exe, image, base)) { printf("not a PE / cannot read\n"); return 1; }
+    std::vector<int> tris;
+    auto roots = find_exe_models(image, base, 30, &tris);
+    printf("%s: image base 0x%x, %zu embedded models (>=30 tris)\n",
+           fs::path(exe).filename().string().c_str(), base, roots.size());
+    for (size_t i = 0; i < roots.size() && i < 40; i++)
+        printf("  [%zu] root=0x%08x tris=%d\n", i, roots[i], tris[i]);
+    return 0;
+}
+
+static int cmd_exefbx(const char* exe, const char* out, int idx) {
+    std::vector<uint8_t> image; uint32_t base = 0;
+    if (!load_pe_image(exe, image, base)) { printf("not a PE / cannot read\n"); return 1; }
+    auto roots = find_exe_models(image, base, 30, nullptr);
+    if (idx < 0 || idx >= (int)roots.size()) { printf("index out of range (0..%zu)\n", roots.size() ? roots.size()-1 : 0); return 1; }
+    NinjaBlob blob(image, base, false);
+    Model m;
+    if (!blob.build_model(roots[idx], m)) { printf("build failed\n"); return 1; }
+    m.name = "exe_model";
+    FbxExportOptions opts;
+    std::string e2;
+    if (!export_fbx(out, m, {}, {}, opts, &e2)) { printf("fbx write failed: %s\n", e2.c_str()); return 1; }
+    printf("exe model [%d] root=0x%08x: %zu tris -> %s\n", idx, roots[idx],
+           m.triangle_count(), out);
+    return 0;
+}
+
 static int cmd_wav(const char* path, const char* out) {
     auto data = load_file(path);
     if (data.empty()) { printf("cannot read %s\n", path); return 1; }
@@ -585,6 +614,8 @@ int main(int argc, char** argv) {
     if (cmd == "stage" && argc >= 4)    return cmd_stage(argv[2], argv[3]);
     if (cmd == "set" && argc >= 3)      return cmd_set(argv[2]);
     if (cmd == "wav" && argc >= 4)      return cmd_wav(argv[2], argv[3]);
+    if (cmd == "exemodels" && argc >= 3) return cmd_exemodels(argv[2]);
+    if (cmd == "exefbx" && argc >= 5)   return cmd_exefbx(argv[2], argv[3], atoi(argv[4]));
     if (cmd == "regress" && argc >= 3)  return cmd_regress(argv[2]);
     if (cmd == "search" && argc >= 4)   return cmd_search(argv[2], argv[3]);
     if (cmd == "sections" && argc >= 3) return cmd_sections(argv[2]);

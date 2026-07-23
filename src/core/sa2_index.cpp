@@ -255,12 +255,42 @@ bool GameIndex::scan(const std::string& folder) {
         e.name = it->path().filename().string();
         e.size = (uint64_t)it->file_size(ec2);
         std::string nl = lower(e.name), rl = lower(e.rel_path);
+        // executables aren't assets themselves; sonic2app.exe is surfaced as its
+        // embedded ExeModel entries instead (see below)
+        if (ends_with(nl, ".exe") || ends_with(nl, ".dll")) continue;
         e.kind = classify(nl, rl);
         e.compressed = ends_with(nl, ".prs");
         assign_display(e, names_);
         entries_.push_back(std::move(e));
         if (entries_.size() > 200000) break;
     }
+
+    // Enemy / object / NPC models are compiled into sonic2app.exe as little-endian
+    // Ninja trees. Build one flat image of it and surface each model in the
+    // Enemies section (the loader reuses this cached image).
+    {
+        std::string exe = root_ + "/sonic2app.exe";
+        std::error_code ec3;
+        if (fs::exists(exe, ec3) && load_pe_image(exe, exe_image_, exe_base_)) {
+            std::vector<int> tris;
+            auto roots = find_exe_models(exe_image_, exe_base_, 50, &tris);
+            for (size_t i = 0; i < roots.size(); i++) {
+                AssetEntry e;
+                e.path = exe;
+                e.rel_path = "sonic2app.exe";
+                e.kind = AssetKind::ExeModel;
+                e.section = Section::Enemies;
+                e.exe_root = roots[i];
+                char nm[64];
+                snprintf(nm, sizeof nm, "Model %03zu  (%d tris)", i, tris[i]);
+                e.name = nm;
+                e.display_name = nm;
+                e.subtitle = "sonic2app.exe";
+                entries_.push_back(std::move(e));
+            }
+        }
+    }
+
     std::sort(entries_.begin(), entries_.end(),
               [](const AssetEntry& a, const AssetEntry& b) {
                   // within a section, order by display name then path
@@ -452,6 +482,18 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
     if (e.kind == AssetKind::Texture || e.kind == AssetKind::TextureArchive ||
         e.kind == AssetKind::PakArchive || e.kind == AssetKind::EventTexture) {
         if (!load_textures(e.path, out.textures)) return fail("no textures found");
+        return true;
+    }
+
+    // Enemy / object model compiled into sonic2app.exe: build from the flat image
+    // the index already cached (do not re-read the 21 MB executable).
+    if (e.kind == AssetKind::ExeModel) {
+        if (idx.exe_image().empty()) return fail("executable image not loaded");
+        NinjaBlob blob(idx.exe_image(), idx.exe_base(), false);
+        Model m;
+        if (!blob.build_model(e.exe_root, m)) return fail("exe model build failed");
+        m.name = e.name;
+        out.models.push_back(std::move(m));
         return true;
     }
 

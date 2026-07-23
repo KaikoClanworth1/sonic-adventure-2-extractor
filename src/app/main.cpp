@@ -847,8 +847,9 @@ int run_app() {
         // section tabs
         if (ImGui::BeginTabBar("sections", ImGuiTabBarFlags_FittingPolicyScroll)) {
             static const Section kTabs[] = {Section::Maps, Section::Characters,
-                                            Section::Objects, Section::Particles,
-                                            Section::Audio, Section::Other};
+                                            Section::Enemies, Section::Objects,
+                                            Section::Particles, Section::Audio,
+                                            Section::Other};
             int clicked = -1;
             for (Section s : kTabs) {
                 int n = index.section_count(s);

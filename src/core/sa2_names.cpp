@@ -24,6 +24,7 @@ const char* section_name(Section s) {
         case Section::Objects:    return "Objects";
         case Section::Particles:  return "Particles";
         case Section::Audio:      return "Audio";
+        case Section::Enemies:    return "Enemies";
         default:                  return "Other";
     }
 }

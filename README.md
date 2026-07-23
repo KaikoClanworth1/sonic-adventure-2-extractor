@@ -45,6 +45,10 @@ verified by a batch regression that runs every parser over every shipped file.
 * **Plays and exports the music** — decodes SA2's CRI **ADX** audio
   (`resource/gd_PC/ADX/*.adx`), with an in-app **Play** button and **Export WAV**
   (`sa2cli wav in.adx out.wav`).
+* **Enemy / object models from the executable** — SA2 compiles its enemy, NPC and
+  object models into `sonic2app.exe` (little-endian Ninja trees) rather than the
+  data folder. The viewer surfaces ~400 of them in an **Enemies** tab, each
+  loadable and FBX-exportable (`sa2cli exemodels`, `sa2cli exefbx`).
 * Persisted game-folder setting and a **UI scale slider** for high-DPI displays.
 
 ## Verified coverage
@@ -52,7 +56,7 @@ verified by a batch regression that runs every parser over every shipped file.
 `sa2cli regress` over the retail Steam build:
 
 ```
-  files indexed      : 4351
+  files indexed      : 4734
   PRS decompressed   : 2451 ok, 0 failed
   PAK archives       : 231 ok, 0 failed
   GVM archives       : 606 ok, 0 failed (16057 textures)
@@ -96,6 +100,8 @@ sa2cli stage     <stgXXD.rel> <dir>  export a stage: FBX + textures +
                                      Unity shader + material JSON + placement
 sa2cli set       <setXXXX_s.bin>     list placed objects
 sa2cli wav       <file.adx> <out.wav> decode CRI ADX music to a WAV
+sa2cli exemodels <sonic2app.exe>     list models compiled into the exe
+sa2cli exefbx    <exe> <out.fbx> <n> export embedded model n to FBX
 sa2cli regress   <game>              batch-test every parser on every file
 ```
 
@@ -152,11 +158,14 @@ the game rather than sitting in a file:
   separate models. The *motion* that drives it (UV scroll rates, moving platforms)
   is bound by compiled game code and is not stored as replayable keyframes, so it
   is not reconstructed.
-* **Object / NPC placement: supported. Model *mapping* is not.** Every `setXXXX`
-  file is parsed and exported as a scene JSON (id, position, rotation, scale).
-  Turning an object id into a model needs the community `objdefs` metadata (an
-  ID→model table maintained by SA Tools), which this project does not bundle;
-  enemy/NPC models themselves live inside `sonic2app.exe`, not in `gd_PC`.
+* **Object / NPC placement: supported. Model *mapping* is partial.** Every
+  `setXXXX` file is parsed, exported as a scene JSON (id, position, rotation,
+  scale) and overlaid on the loaded map with a zoom-to list. The enemy/NPC/object
+  models themselves are compiled into `sonic2app.exe` — those are now extracted
+  and browsable in the **Enemies** tab — but turning a placed object's *id* into
+  the right one of those models needs the community `objdefs` ID→model table (an
+  SA Tools artefact this project does not bundle), so the on-map markers are
+  positions, not yet the resolved props.
 * **Highest texture resolution is already reached.** The PC port did **not**
   upscale textures — its DDS replacements are the same resolution as the GVR
   originals. The tool prefers the PC DDS PAK when one exists (better alpha) and
