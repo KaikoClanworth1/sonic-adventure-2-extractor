@@ -405,23 +405,48 @@ int run_app() {
     ImGui_ImplOpenGL3_Init("#version 130");
 
     GameIndex index;
+    // Auto-detect a Steam install on first run so most users never see setup.
+    if (cfg.game_folder.empty()) {
+        std::string found = autodetect_game_folder();
+        if (!found.empty()) cfg.game_folder = found;
+    }
     if (!cfg.game_folder.empty()) index.scan(cfg.game_folder);
 
     Scene scene;
     Camera cam;
     LoadedAsset current;
     char search_buf[256]{};
-    std::vector<int> filtered = index.search("", 3000);
+    int cur_section = (int)Section::Maps;
+    std::vector<int> section_items;
+    bool refresh_list = true;    // recompute section_items next frame
     std::string status = index.entries().empty()
-                             ? "Set the game folder to begin."
-                             : ("Indexed " + std::to_string(index.entries().size()) +
+                             ? "Select your Sonic Adventure 2 folder to begin."
+                             : ("Loaded " + std::to_string(index.entries().size()) +
                                 " files.");
     int selected = -1, pending = -1;
+    int force_section = -1;      // when >=0, force the tab bar to this section
     int model_sel = -1;          // -1 = every model in the file
     bool rebuild_scene = false;
     bool wireframe = false, lighting = true, textured = true, show_textures = false;
+    bool show_settings = false;
+    bool show_setup = index.entries().empty();
+    char path_buf[512]{};
+    strncpy_s(path_buf, cfg.game_folder.c_str(), sizeof(path_buf) - 1);
     float applied_scale = -1.0f;
     int frame = 0;
+
+    // Rescan the game folder in path_buf and refresh UI state.
+    auto do_rescan = [&](const std::string& folder) {
+        cfg.game_folder = folder;
+        index.scan(folder);
+        cfg.save();
+        selected = -1;
+        refresh_list = true;
+        show_setup = index.entries().empty();
+        status = index.entries().empty()
+                     ? "No game files found in that folder."
+                     : ("Loaded " + std::to_string(index.entries().size()) + " files.");
+    };
 
     if (!open_match.empty()) {
         // Prefer an exact filename match: "sonicmdl.prs" must not select
@@ -431,6 +456,11 @@ int run_app() {
         for (int i = 0; i < (int)index.entries().size() && selected < 0; i++)
             if (index.entries()[i].rel_path.find(open_match) != std::string::npos)
                 selected = pending = i;
+        if (selected >= 0) {
+            cur_section = (int)index.entries()[selected].section;
+            force_section = cur_section;
+            refresh_list = true;
+        }
         if (const char* ms = getenv("SA2VIEWER_MODEL")) model_sel = atoi(ms);
     }
 
@@ -461,11 +491,11 @@ int run_app() {
                 char buf[256];
                 snprintf(buf, sizeof buf,
                          "%s: %d tris, %d textures, %d anims",
-                         e.name.c_str(), (int)scene.tris, (int)scene.textures.size(),
-                         (int)current.motions.size());
+                         e.display_name.c_str(), (int)scene.tris,
+                         (int)scene.textures.size(), (int)current.motions.size());
                 status = buf;
             } else {
-                status = "Failed: " + e.name + " - " + err;
+                status = "Could not open " + e.display_name + " - " + err;
             }
             pending = -1;
         }
@@ -481,73 +511,86 @@ int run_app() {
 
         int dw = 0, dh = 0;
         glfwGetFramebufferSize(win, &dw, &dh);
-        float panel_w = std::min(480.0f * cfg.ui_scale, dw * 0.4f);
+        float panel_w = std::min(460.0f * cfg.ui_scale, dw * 0.42f);
         float right_w = std::min(340.0f * cfg.ui_scale, dw * 0.3f);
 
-        // -------- left: browser
+        if (refresh_list) {
+            section_items = index.in_section((Section)cur_section, search_buf, 20000);
+            refresh_list = false;
+        }
+
+        // -------- left: browser with section tabs
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(panel_w, (float)dh));
-        ImGui::Begin("Assets", nullptr,
+        ImGui::Begin("Library", nullptr,
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
-        ImGui::TextUnformatted("Sonic Adventure 2  -  Extractor & Model Viewer");
-        ImGui::Separator();
-        ImGui::TextUnformatted("Game folder");
-        char gf[512]{};
-        strncpy_s(gf, cfg.game_folder.c_str(), sizeof(gf) - 1);
-        ImGui::PushItemWidth(-100 * cfg.ui_scale);
-        if (ImGui::InputText("##gf", gf, sizeof gf)) cfg.game_folder = gf;
+
+        ImGui::TextUnformatted("Sonic Adventure 2");
+        ImGui::SameLine(panel_w - 90 * cfg.ui_scale);
+        if (ImGui::Button("Settings")) show_settings = true;
+
+        // search within the current section
+        ImGui::PushItemWidth(-1);
+        if (ImGui::InputTextWithHint("##search", "Search this section...", search_buf,
+                                     sizeof search_buf))
+            refresh_list = true;
         ImGui::PopItemWidth();
-        ImGui::SameLine();
-        if (ImGui::Button("Browse...")) {
-            std::string p = pick_folder();
-            if (!p.empty()) {
-                cfg.game_folder = p;
-                index.scan(p);
-                filtered = index.search(search_buf, 3000);
-                selected = -1;
-                cfg.save();
-                status = "Indexed " + std::to_string(index.entries().size()) + " files.";
+
+        // section tabs
+        if (ImGui::BeginTabBar("sections", ImGuiTabBarFlags_FittingPolicyScroll)) {
+            static const Section kTabs[] = {Section::Maps, Section::Characters,
+                                            Section::Objects, Section::Particles,
+                                            Section::Audio, Section::Other};
+            int clicked = -1;
+            for (Section s : kTabs) {
+                int n = index.section_count(s);
+                char label[64];
+                snprintf(label, sizeof label, "%s (%d)", section_name(s), n);
+                ImGuiTabItemFlags fl = 0;
+                if (force_section == (int)s) fl |= ImGuiTabItemFlags_SetSelected;
+                if (ImGui::BeginTabItem(label, nullptr, fl)) {
+                    clicked = (int)s;
+                    ImGui::EndTabItem();
+                }
             }
+            // A forced switch wins over the tab bar's default-first-tab behaviour
+            // on the frame it happens; otherwise follow the user's click.
+            if (force_section >= 0) {
+                cur_section = force_section;
+                force_section = -1;
+                refresh_list = true;
+            } else if (clicked >= 0 && clicked != cur_section) {
+                cur_section = clicked;
+                refresh_list = true;
+            }
+            ImGui::EndTabBar();
         }
-        if (ImGui::Button("Rescan")) {
-            index.scan(cfg.game_folder);
-            filtered = index.search(search_buf, 3000);
-            selected = -1;
-            cfg.save();
-            status = "Indexed " + std::to_string(index.entries().size()) + " files.";
+
+        ImGui::BeginChild("list", ImVec2(0, -40 * cfg.ui_scale));
+        if (section_items.empty()) {
+            ImGui::TextDisabled(index.entries().empty()
+                                    ? "No game loaded."
+                                    : "Nothing here matches your search.");
         }
-        ImGui::SameLine();
-        ImGui::PushItemWidth(-1);
-        if (ImGui::SliderFloat("##uiscale", &cfg.ui_scale, 0.75f, 3.0f, "UI scale %.2fx"))
-            cfg.save();
-        ImGui::PopItemWidth();
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Search all files");
-        ImGui::PushItemWidth(-1);
-        if (ImGui::InputText("##search", search_buf, sizeof search_buf))
-            filtered = index.search(search_buf, 3000);
-        ImGui::PopItemWidth();
-        ImGui::Text("showing %d of %d", (int)filtered.size(),
-                    (int)index.entries().size());
-        ImGui::Separator();
-
-        ImGui::BeginChild("list", ImVec2(0, -46 * cfg.ui_scale));
         ImGuiListClipper clipper;
-        clipper.Begin((int)filtered.size());
+        clipper.Begin((int)section_items.size());
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                int ei = filtered[i];
+                int ei = section_items[i];
                 const auto& e = index.entries()[ei];
                 ImGui::PushID(ei);
-                if (ImGui::Selectable(e.rel_path.c_str(), ei == selected)) {
+                bool sel = (ei == selected);
+                if (ImGui::Selectable(e.display_name.c_str(), sel,
+                                      ImGuiSelectableFlags_AllowDoubleClick)) {
                     selected = ei;
                     pending = ei;
+                    model_sel = -1;
                 }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s\n%s\n%llu bytes", e.rel_path.c_str(),
-                                      kind_name(e.kind), (unsigned long long)e.size);
+                    ImGui::SetTooltip("%s\n%s  -  %llu KB", e.subtitle.c_str(),
+                                      kind_name(e.kind),
+                                      (unsigned long long)(e.size / 1024));
                 ImGui::PopID();
             }
         }
@@ -555,6 +598,86 @@ int run_app() {
         ImGui::Separator();
         ImGui::TextWrapped("%s", status.c_str());
         ImGui::End();
+
+        // -------- settings modal
+        if (show_settings) {
+            ImGui::OpenPopup("Settings");
+            show_settings = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(560 * cfg.ui_scale, 0), ImGuiCond_Appearing);
+        if (ImGui::BeginPopupModal("Settings", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Game folder");
+            ImGui::TextDisabled("The folder containing sonic2app.exe and resource\\gd_PC");
+            ImGui::PushItemWidth(-1);
+            ImGui::InputText("##path", path_buf, sizeof path_buf);
+            ImGui::PopItemWidth();
+            if (ImGui::Button("Browse...")) {
+                std::string p = pick_folder();
+                if (!p.empty()) strncpy_s(path_buf, p.c_str(), sizeof(path_buf) - 1);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Auto-detect")) {
+                std::string f = autodetect_game_folder();
+                if (!f.empty()) strncpy_s(path_buf, f.c_str(), sizeof(path_buf) - 1);
+                else status = "No Steam install of SA2 found automatically.";
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Apply")) do_rescan(path_buf);
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Display");
+            ImGui::PushItemWidth(220 * cfg.ui_scale);
+            if (ImGui::SliderFloat("UI scale", &cfg.ui_scale, 0.75f, 3.0f, "%.2fx"))
+                cfg.save();
+            ImGui::PopItemWidth();
+            ImGui::TextDisabled("Tip: raise this on a 4K monitor.");
+
+            ImGui::Separator();
+            if (ImGui::Button("Close", ImVec2(120 * cfg.ui_scale, 0)))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // -------- first-run setup (centered) when no game is loaded
+        if (show_setup && index.entries().empty()) {
+            ImGui::SetNextWindowPos(ImVec2(dw * 0.5f, dh * 0.5f), ImGuiCond_Always,
+                                    ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(620 * cfg.ui_scale, 0));
+            ImGui::Begin("Welcome", nullptr,
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+            ImGui::TextUnformatted("Welcome to the Sonic Adventure 2 Extractor & Model Viewer");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Point the app at your Sonic Adventure 2 install to begin. "
+                               "That is the folder holding sonic2app.exe and the "
+                               "resource\\gd_PC folder - usually:");
+            ImGui::TextDisabled("  C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sonic Adventure 2");
+            ImGui::Spacing();
+            ImGui::PushItemWidth(-1);
+            ImGui::InputTextWithHint("##setuppath", "Paste your game folder here...",
+                                     path_buf, sizeof path_buf);
+            ImGui::PopItemWidth();
+            ImGui::Spacing();
+            if (ImGui::Button("Auto-detect Steam install", ImVec2(230 * cfg.ui_scale, 0))) {
+                std::string f = autodetect_game_folder();
+                if (!f.empty()) { strncpy_s(path_buf, f.c_str(), sizeof(path_buf) - 1); do_rescan(f); }
+                else status = "Could not find SA2 automatically - browse to it instead.";
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...", ImVec2(120 * cfg.ui_scale, 0))) {
+                std::string p = pick_folder();
+                if (!p.empty()) { strncpy_s(path_buf, p.c_str(), sizeof(path_buf) - 1); do_rescan(p); }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Use this path", ImVec2(140 * cfg.ui_scale, 0)))
+                do_rescan(path_buf);
+            if (!status.empty()) {
+                ImGui::Spacing();
+                ImGui::TextWrapped("%s", status.c_str());
+            }
+            ImGui::End();
+        }
 
         // -------- right: inspector
         ImGui::SetNextWindowPos(ImVec2((float)dw - right_w, 0));

@@ -326,7 +326,25 @@ the file — it indexes a per-stage object list that SA Tools carries as curated
 `objdefs` metadata, so the tool exports placement (id + transform) as a scene
 JSON rather than resolving models.
 
-## 10. What is not implemented
+## 10. Friendly names (from the executable)
+
+The UI's friendly names come straight out of `sonic2app.exe`, not a bundled
+table:
+
+* **Stage number -> name** from the compiled source paths, e.g.
+  `..\src\stg13_cityescape`, `..\src\stg34_CannonsCoreSonic`. These give a
+  reliable `stgNN -> codename` map (and, for Cannon's Core, the character).
+* **Clean display names** from the in-game English stage-name strings (the
+  `"<Name> BGM."` sound-test block: `City Escape BGM.`, `Metal Harbor BGM.` ...).
+
+Each codename is matched to a clean name by normalized containment
+(`cityescape` -> "City Escape", `pumpkin` -> "Pumpkin Hill"), falling back to a
+prettified codename; rival battles (`sonicvsshadow`) become "Sonic vs Shadow".
+Character names come from the model file prefix (`sonicmdl` -> Sonic,
+`milesmdl` -> Tails, `metalsonicmdl` -> Metal Sonic), and boss arenas from a
+small keyed table (`bigfoot` -> Big Foot, `last1` -> Biolizard).
+
+## 11. What is not implemented
 
 * **Object/enemy models compiled into `sonic2app.exe`** (GC "Ginja" at absolute
   VAs, ImageBase 0x00400000) — the placement side is done, the model resolution

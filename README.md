@@ -20,6 +20,11 @@ verified by a batch regression that runs every parser over every shipped file.
 * **Extracts whole stages** — GameCube REL relocation, GC "Ginja" geometry and
   LandTables, including the animated-scenery `_uv`/`_ani`/`_x` sub-tables and the
   matching object placement (SET files).
+* **Friendly, organised browser** — assets are grouped into **Maps / Characters
+  / Objects / Particles** tabs with names read straight from the game
+  (`City Escape`, `Cannon's Core (Sonic)`, `Metal Sonic`, `Boss: Biolizard`),
+  not raw file names. Auto-detects your Steam install; a first-run screen and a
+  Settings panel let you set the game folder by hand if needed.
 * **Renders models and stages** in a textured, lit 3D viewport (orbit + zoom),
   with a per-model / per-landtable selector.
 * **Exports to binary FBX** with meshes, UVs, materials, textures, the node
@@ -52,7 +57,11 @@ Every stage FBX is round-tripped through headless Blender: City Escape
 (124,787 tris, 126 textures, 2,376 bones) and Crazy Gadget (three landtables:
 main + `_uv` scroll + `_x` animated) both import clean.
 
-![Stage](docs/stage.png)
+The browser groups everything by friendly name — here the **Characters** tab
+with Knuckles loaded, and the first-run setup screen:
+
+![Characters](docs/characters.png)
+![Setup](docs/setup.png)
 
 ## Getting it
 

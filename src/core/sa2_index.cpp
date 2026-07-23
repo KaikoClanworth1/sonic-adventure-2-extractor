@@ -127,6 +127,107 @@ static AssetKind classify(const std::string& name_l, const std::string& rel_l) {
     return AssetKind::Unknown;
 }
 
+// Is this file a particle / effect asset? (effect texture sheets, fire, splash)
+static bool is_particle(const std::string& name_l) {
+    static const char* kw[] = {"efftex", "_eff", "eveff", "screeneffect",
+                               "_fire", "fire_", "backfire", "splash", "kemuri",
+                               "bomtex", "blast", "explo", "hanabi"};
+    for (const char* k : kw)
+        if (name_l.find(k) != std::string::npos) return true;
+    return false;
+}
+
+// Pull the two-digit stage number out of "stg13d.rel" / "set0013_s.bin".
+static int stage_number(const std::string& name_l) {
+    size_t i = 0;
+    while (i < name_l.size() && !std::isdigit((unsigned char)name_l[i])) i++;
+    if (i >= name_l.size()) return -1;
+    int n = 0, digits = 0;
+    while (i < name_l.size() && std::isdigit((unsigned char)name_l[i]) && digits < 4) {
+        n = n * 10 + (name_l[i] - '0');
+        i++; digits++;
+    }
+    return digits ? n : -1;
+}
+
+// Friendly boss-arena names, keyed by a substring of the REL file name.
+static std::string boss_name(const std::string& nl) {
+    struct Row { const char* key; const char* name; };
+    static const Row rows[] = {
+        {"bigfoot", "Boss: Big Foot"}, {"hotshot", "Boss: Hot Shot"},
+        {"bigbogy", "Boss: King Boom Boo"}, {"fdog", "Boss: Flying Dog"},
+        {"golem", "Boss: Egg Golem"}, {"last1", "Boss: Biolizard"},
+        {"last2", "Boss: Finalhazard"},
+    };
+    for (const auto& r : rows)
+        if (nl.find(r.key) != std::string::npos) return r.name;
+    return "";
+}
+
+// Assign a user-facing section + friendly display name to an entry.
+static void assign_display(AssetEntry& e, const NameTable& names) {
+    std::string nl = lower(e.name);
+    e.subtitle = e.name;
+    switch (e.kind) {
+        case AssetKind::Stage: {
+            e.section = Section::Maps;
+            int num = stage_number(nl);
+            auto it = names.stages.find(num);
+            if (nl.find("boss") != std::string::npos) {
+                std::string b = boss_name(nl);
+                e.display_name = b.empty() ? ("Boss " + std::to_string(num)) : b;
+            } else if (it != names.stages.end()) {
+                e.display_name = it->second;
+            } else {
+                e.display_name = "Stage " + std::to_string(num);
+            }
+            break;
+        }
+        case AssetKind::CharacterModel:
+            e.section = Section::Characters;
+            e.display_name = friendly_character_name(e.name);
+            break;
+        case AssetKind::CharacterMotion:
+            e.section = Section::Characters;
+            e.display_name = friendly_character_name(e.name) + " (animations)";
+            break;
+        case AssetKind::SetPlacement: {
+            e.section = Section::Objects;
+            int num = stage_number(nl);
+            auto it = names.stages.find(num);
+            std::string base = (it != names.stages.end()) ? it->second
+                                                          : ("Stage " + std::to_string(num));
+            e.display_name = base + " - object layout";
+            break;
+        }
+        case AssetKind::EventScene:
+            e.section = Section::Objects;
+            e.display_name = "Cutscene " + e.name.substr(0, e.name.find('.'));
+            break;
+        case AssetKind::Audio:
+        case AssetKind::Video:
+            e.section = Section::Audio;
+            e.display_name = e.name;
+            break;
+        case AssetKind::TextureArchive:
+        case AssetKind::Texture:
+        case AssetKind::PakArchive:
+        case AssetKind::EventTexture:
+            e.section = is_particle(nl) ? Section::Particles : Section::Objects;
+            e.display_name = e.name;
+            break;
+        case AssetKind::Message:
+            e.section = Section::Other;
+            e.display_name = e.name;
+            break;
+        default:
+            e.section = is_particle(nl) ? Section::Particles : Section::Other;
+            e.display_name = e.name;
+            break;
+    }
+    if (e.display_name.empty()) e.display_name = e.name;
+}
+
 bool GameIndex::scan(const std::string& folder) {
     entries_.clear();
     root_.clear();
@@ -138,6 +239,9 @@ bool GameIndex::scan(const std::string& folder) {
     fs::path gd = base / "resource" / "gd_PC";
     if (fs::exists(gd, ec) && fs::is_directory(gd, ec)) base = base;
     root_ = base.string();
+
+    // friendly names come from the executable, so load it once up front
+    names_ = load_name_table(root_);
 
     for (fs::recursive_directory_iterator it(base, fs::directory_options::skip_permission_denied, ec), end;
          it != end; it.increment(ec)) {
@@ -153,14 +257,44 @@ bool GameIndex::scan(const std::string& folder) {
         std::string nl = lower(e.name), rl = lower(e.rel_path);
         e.kind = classify(nl, rl);
         e.compressed = ends_with(nl, ".prs");
+        assign_display(e, names_);
         entries_.push_back(std::move(e));
         if (entries_.size() > 200000) break;
     }
     std::sort(entries_.begin(), entries_.end(),
               [](const AssetEntry& a, const AssetEntry& b) {
+                  // within a section, order by display name then path
+                  if (a.section != b.section)
+                      return (int)a.section < (int)b.section;
+                  if (a.display_name != b.display_name)
+                      return a.display_name < b.display_name;
                   return a.rel_path < b.rel_path;
               });
     return !entries_.empty();
+}
+
+std::vector<int> GameIndex::in_section(Section s, const std::string& query,
+                                       int limit) const {
+    std::vector<int> out;
+    std::string q = lower(query);
+    for (int i = 0; i < (int)entries_.size(); i++) {
+        if (entries_[i].section != s) continue;
+        if (!q.empty()) {
+            std::string dn = lower(entries_[i].display_name);
+            std::string rn = lower(entries_[i].rel_path);
+            if (dn.find(q) == std::string::npos && rn.find(q) == std::string::npos)
+                continue;
+        }
+        out.push_back(i);
+        if ((int)out.size() >= limit) break;
+    }
+    return out;
+}
+
+int GameIndex::section_count(Section s) const {
+    int n = 0;
+    for (const auto& e : entries_) if (e.section == s) n++;
+    return n;
 }
 
 std::vector<int> GameIndex::search(const std::string& query, int limit) const {

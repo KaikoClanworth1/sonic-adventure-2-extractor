@@ -238,25 +238,54 @@ enum class AssetKind {
 };
 const char* kind_name(AssetKind k);
 
+// User-facing sections shown as tabs in the viewer.
+enum class Section { Maps, Characters, Objects, Particles, Audio, Other, COUNT };
+const char* section_name(Section s);
+
 struct AssetEntry {
-    std::string path;         // absolute
-    std::string rel_path;     // relative to the game folder
-    std::string name;
+    std::string path;          // absolute
+    std::string rel_path;      // relative to the game folder
+    std::string name;          // file name
+    std::string display_name;  // friendly name (from the game where possible)
+    std::string subtitle;      // secondary label (e.g. the raw file name)
     uint64_t size = 0;
     AssetKind kind = AssetKind::Unknown;
-    bool compressed = false;  // PRS
+    Section section = Section::Other;
+    bool compressed = false;   // PRS
 };
+
+// Friendly names pulled from sonic2app.exe: stage number -> stage name (from the
+// compiled source paths + the in-game stage-name strings).
+struct NameTable {
+    std::map<int, std::string> stages;   // 13 -> "City Escape"
+    bool loaded = false;
+};
+NameTable load_name_table(const std::string& game_root);
+
+// Best-effort friendly name for a character model/motion file (sonicmdl.prs ->
+// "Sonic"). Works from the file name alone.
+std::string friendly_character_name(const std::string& file_name);
 
 class GameIndex {
 public:
     bool scan(const std::string& game_folder);
     const std::vector<AssetEntry>& entries() const { return entries_; }
     const std::string& root() const { return root_; }
+    const NameTable& names() const { return names_; }
     std::vector<int> search(const std::string& query, int limit = 2000) const;
+    // Indices of entries in a section, optionally filtered by a query.
+    std::vector<int> in_section(Section s, const std::string& query = "",
+                                int limit = 5000) const;
+    int section_count(Section s) const;
 private:
     std::string root_;
     std::vector<AssetEntry> entries_;
+    NameTable names_;
 };
+
+// Tries to locate a Sonic Adventure 2 install (Steam library folders, common
+// paths). Returns an empty string if none is found.
+std::string autodetect_game_folder();
 
 std::vector<uint8_t> read_file(const std::string& path);
 // Reads a file and PRS-decompresses it when it is compressed.

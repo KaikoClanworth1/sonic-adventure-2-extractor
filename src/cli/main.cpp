@@ -56,6 +56,26 @@ static int cmd_list(const char* game) {
     return 0;
 }
 
+static int cmd_sections(const char* game) {
+    GameIndex idx;
+    if (!idx.scan(game)) { printf("could not scan '%s'\n", game); return 1; }
+    printf("Names loaded from executable: %s (%zu stages)\n\n",
+           idx.names().loaded ? "yes" : "no", idx.names().stages.size());
+    for (int s = 0; s < (int)Section::COUNT; s++) {
+        Section sec = (Section)s;
+        auto items = idx.in_section(sec, "", 100000);
+        printf("== %s (%d) ==\n", section_name(sec), (int)items.size());
+        int shown = 0;
+        for (int i : items) {
+            if (shown++ >= 24) { printf("   ... and %d more\n", (int)items.size() - 24); break; }
+            const auto& e = idx.entries()[i];
+            printf("   %-30s  [%s]\n", e.display_name.c_str(), e.name.c_str());
+        }
+        printf("\n");
+    }
+    return 0;
+}
+
 static int cmd_search(const char* game, const char* q) {
     GameIndex idx;
     if (!idx.scan(game)) { printf("could not scan '%s'\n", game); return 1; }
@@ -553,6 +573,7 @@ int main(int argc, char** argv) {
     if (cmd == "set" && argc >= 3)      return cmd_set(argv[2]);
     if (cmd == "regress" && argc >= 3)  return cmd_regress(argv[2]);
     if (cmd == "search" && argc >= 4)   return cmd_search(argv[2], argv[3]);
+    if (cmd == "sections" && argc >= 3) return cmd_sections(argv[2]);
     usage();
     return 1;
 }
