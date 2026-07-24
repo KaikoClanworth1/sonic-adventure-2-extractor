@@ -326,8 +326,9 @@ GCVertexSet (16, ends at attribute 0xFF/0): u8 attribute (1=Pos,2=Normal,
                  u32 structure (structType=&0xF, dataType=(>>4)&0xF),
                  u32 dataPtr, u32 dataLen
 GCMesh (16): u32 paramPtr, i32 paramCount, u32 primPtr, u32 primSize
-GCParameter (8): u8 type (1=IndexAttributeFlags, 2=Lighting, 4=BlendAlpha,
-                 5=AmbientColor, 8=Texture, 10=MipMap), u32 data
+GCParameter (8): u8 type (0=VtxAttrFmt, 1=IndexAttributeFlags, 2=Lighting,
+                 4=BlendAlpha, 5=AmbientColor, 8=Texture, 9=unknown,
+                 10=TexCoordGen), u32 data
 ```
 
 Positions/normals are float32 XYZ; colours RGBA8; UVs are int16/255. The display
@@ -340,13 +341,22 @@ the value persists across meshes until another parameter changes it).
 Parameter details worth knowing: the Texture param is `{u16 textureId, u16
 tileMode}` (tile mode is wrap/mirror per axis only). BlendAlpha's `1<<14` is the
 "use alpha" bit. Lighting's two presets are `0x0b11` (unlit, vertex-coloured) and
-`0x0011` (lit by normals), which is where the `ignore_light` bit comes from. There
-is **no environment-mapping flag** among these parameters — an earlier version of
-this parser wrongly derived one from type 10, which is actually MipMap.
+`0x0011` (lit by normals), which is where the `ignore_light` bit comes from.
+**TexCoordGen** (type 10) unpacks as `{mtx = d & 0xF, src = (d>>4) & 0xFF,
+type = (d>>12) & 0xF, texId = (d>>16) & 0xFF}`; generating coordinates from the
+*normal* (`src == 1`) is spherical environment mapping, which is where `env_map`
+comes from.
 
-The parameter numbering, `Decode255` UV scale and index-flag layout above were
-cross-checked against [SAModelTools](https://github.com/tge-was-taken/SAModelTools)
-(`SAModelLibrary/GeometryFormats/GC/`), which agrees with what was derived here.
+These were cross-checked against two community implementations:
+[BlenderSASupport](https://github.com/Justin113D/BlenderSASupport) (`format_GC.py`,
+`enums.py`) and [SAModelTools](https://github.com/tge-was-taken/SAModelTools)
+(`SAModelLibrary/GeometryFormats/GC/`). They agree with each other and with this
+parser on the index-attribute flags, the `1<<14` alpha bit and the lighting
+presets. Where they disagree, prefer BlenderSASupport: it names type 10
+TexCoordGen and documents its bitfields (matching the behaviour observed here),
+while SAModelTools labels the same type MipMap and omits types 0 and 9 entirely.
+Note the two also differ on the UV divisor — SAModelTools' `UVCodec.Decode255`
+uses 255.
 
 ## 9. SET object placement
 

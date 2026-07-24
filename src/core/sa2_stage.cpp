@@ -127,8 +127,9 @@ static void parse_vertex_sets(const NinjaBlob& b, uint32_t ptr,
                     vs.c.push_back(((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) |
                                    ((uint32_t)p[1] << 8) | p[2]);   // ARGB
                 } else if (attr == GC_TEX0) {
-                    float u = b.i16(e) / 256.0f;
-                    float v = (vs.stride >= 4) ? b.i16(e + 2) / 256.0f : 0.0f;
+                    // fixed point over 255, so 0/127/255 give 0.0/0.5/1.0
+                    float u = b.i16(e) / 255.0f;
+                    float v = (vs.stride >= 4) ? b.i16(e + 2) / 255.0f : 0.0f;
                     vs.f.push_back(u);
                     vs.f.push_back(v);
                 }
@@ -195,9 +196,9 @@ static void parse_meshes(const NinjaBlob& b, uint32_t ptr, int count,
                 if (pe + 8 > n) break;
                 uint8_t ptype = b.raw()[pe];
                 uint32_t data = b.u32(pe + 4);
-                // Param types: 1 IndexAttributeFlags, 2 Lighting, 4 BlendAlpha,
-                // 5 AmbientColor, 8 Texture, 10 MipMap. Note there is no
-                // environment-mapping flag among them -- env_map stays off here.
+                // Param types: 0 VtxAttrFmt, 1 IndexAttributeFlags, 2 Lighting,
+                // 4 BlendAlpha, 5 AmbientColor, 8 Texture, 9 unknown,
+                // 10 TexCoordGen.
                 switch (ptype) {
                     case 1: index_flags = data; break;                 // IndexFlags
                     case 8: cur_tex = (int)(data & 0xFFFF); break;     // Texture id
@@ -211,6 +212,12 @@ static void parse_meshes(const NinjaBlob& b, uint32_t ptr, int count,
                         blend_dst = (int)((data >> 8) & 7);
                         blend_src = (int)((data >> 11) & 7);
                         use_alpha = use_alpha || ((data & 0x4000) != 0);   // UseAlpha = 1<<14
+                        break;
+                    case 10:                                           // TexCoordGen
+                        // { mtx = d & 0xF, src = (d>>4) & 0xFF, type = (d>>12) & 0xF,
+                        //   texId = (d>>16) & 0xFF }. Generating coordinates from
+                        // the *normal* (src == 1) is spherical environment mapping.
+                        env_map = (((data >> 4) & 0xFF) == 1);
                         break;
                 }
             }
