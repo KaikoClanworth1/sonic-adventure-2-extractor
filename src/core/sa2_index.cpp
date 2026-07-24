@@ -188,12 +188,20 @@ static void assign_display(AssetEntry& e, const NameTable& names) {
             break;
         }
         case AssetKind::ChaoStage: {
-            e.section = Section::Maps;
             // ChaoStgLobby.prs -> "Chao World: Lobby"
             std::string stem = nl.substr(0, nl.size() - 4);          // drop .prs
             std::string area = stem.size() > 7 ? stem.substr(7) : stem; // drop "chaostg"
             if (!area.empty()) area[0] = (char)std::toupper((unsigned char)area[0]);
             e.display_name = "Chao World: " + (area.empty() ? std::string("Stage") : area);
+            // Odekake is not an area at all: despite the ChaoStg prefix it is the
+            // "going out" menu screen (AL_OdekakeMenuMaster, MainMenuBarExecutor,
+            // AL_TEX_ODEKAKE_MENU_*) and holds no geometry, so keep it out of Maps.
+            if (nl.rfind("chaostgodekake", 0) == 0) {
+                e.section = Section::Other;
+                e.display_name += " (menu)";
+            } else {
+                e.section = Section::Maps;
+            }
             break;
         }
         case AssetKind::CharacterModel:
@@ -697,9 +705,20 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
         std::vector<uint8_t> img;
         if (!rel_relocate(data.data(), data.size(), img))
             return fail("not a REL module");
-        NinjaBlob blob(std::move(img), 0, true);
+        NinjaBlob blob(img, 0, true);
         auto lts = find_landtables(blob);
-        if (lts.empty()) return fail("no landtable in this REL");
+        if (lts.empty()) {
+            // A few arenas (the Final Hazard, stage 42) ship their geometry as
+            // plain GC model trees with no landtable wrapping them. The Chao
+            // reader already knows how to find those in a relocated image.
+            Model m;
+            std::vector<std::string> tn;
+            if (!load_chao_stage_gc(img, m, tn))
+                return fail("no landtable or GC models in this REL");
+            m.name = e.name;
+            out.models.push_back(std::move(m));
+            return true;
+        }
         // Build every landtable as its own model: the main table plus the
         // animated-scenery auxiliaries (_uv scroll, _ani, _x). This is the
         // extractable part of "stage animations" - the animated geometry itself;

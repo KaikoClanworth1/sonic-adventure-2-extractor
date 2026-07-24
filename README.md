@@ -110,6 +110,7 @@ sa2cli set       <setXXXX_s.bin>     list placed objects
 sa2cli wav       <file.adx> <out.wav> decode CRI ADX music to a WAV
 sa2cli exemodels <sonic2app.exe>     list models compiled into the exe
 sa2cli exefbx    <exe> <out.fbx> <n> export embedded model n to FBX
+sa2cli maps      <game>              load every map, report meshes/tris/textures
 sa2cli regress   <game>              batch-test every parser on every file
 ```
 
@@ -159,6 +160,10 @@ The stage viewer covers the parts of a stage that are genuinely stored as data.
 A few things about SA2 are worth stating plainly, because they are compiled into
 the game rather than sitting in a file:
 
+* **Every map loads.** `sa2cli maps <game>` walks the whole Maps list and reports
+  what each one yields — currently **83 of 83 with geometry, none empty**. That
+  includes the two arenas that ship as bare GC model trees with no landtable (the
+  Final Hazard and stage 42), which fall back to a direct model scan.
 * **Stage geometry: fully supported.** 64 stage RELs extract, textured. Both the
   GC "Ginja" and the Dreamcast Chunk landtable variants are handled.
 * **Stage animation is only partly data-driven.** The animated scenery *geometry*

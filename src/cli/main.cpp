@@ -25,6 +25,7 @@ static void usage() {
         "  sa2cli stage     <stgXXD.rel> <out>    export a stage: FBX + textures\n"
         "                                         + Unity shader + material JSON\n"
         "  sa2cli set       <setXXXX_s.bin>       list placed objects\n"
+        "  sa2cli maps      <game>            load every map and report its geometry\n"
         "  sa2cli regress   <game>            batch-test every parser on every file\n"
         "  sa2cli search    <game> <query>    search asset names\n",
         version());
@@ -53,6 +54,33 @@ static int cmd_list(const char* game) {
     for (auto& kv : bykind)
         printf("  %-22s %8d  %12s\n", kv.first.c_str(), kv.second,
                human(bysize[kv.first]).c_str());
+    return 0;
+}
+
+// Load every map in one index scan and report what each one yields. Anything
+// with no geometry is a map that would open empty in the viewer.
+static int cmd_maps(const char* game) {
+    GameIndex idx;
+    if (!idx.scan(game)) { printf("could not scan '%s'\n", game); return 1; }
+    auto items = idx.in_section(Section::Maps, "", 100000);
+    printf("%-32s %8s %8s %6s  %s\n", "MAP", "MESHES", "TRIS", "TEX", "STATUS");
+    int empty = 0;
+    for (int i : items) {
+        const auto& e = idx.entries()[i];
+        LoadedAsset la;
+        std::string err;
+        size_t meshes = 0, tris = 0;
+        bool ok = load_asset(e, idx, la, &err);
+        for (const auto& m : la.models) {
+            meshes += m.parts.size();
+            tris += m.triangle_count();
+        }
+        const char* status = ok ? (tris ? "ok" : "EMPTY") : "FAILED";
+        if (!tris) empty++;
+        printf("%-32s %8zu %8zu %6zu  %s%s%s\n", e.display_name.c_str(), meshes, tris,
+               la.textures.size(), status, ok ? "" : ": ", ok ? "" : err.c_str());
+    }
+    printf("\n%d of %d maps have no geometry\n", empty, (int)items.size());
     return 0;
 }
 
@@ -620,6 +648,7 @@ int main(int argc, char** argv) {
     if (cmd == "regress" && argc >= 3)  return cmd_regress(argv[2]);
     if (cmd == "search" && argc >= 4)   return cmd_search(argv[2], argv[3]);
     if (cmd == "sections" && argc >= 3) return cmd_sections(argv[2]);
+    if (cmd == "maps" && argc >= 3)     return cmd_maps(argv[2]);
     usage();
     return 1;
 }
