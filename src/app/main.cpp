@@ -691,10 +691,14 @@ int run_app() {
                 // a single-model file needs no selector; multi-model files
                 // default to the first so parts do not stack at the origin
                 if (model_sel >= (int)current.models.size()) model_sel = -1;
-                // A Chao area's models are modules of one place (the Lobby is the
-                // room + its .rel + the gate variant), so show them together.
-                bool chao = e.kind == AssetKind::ChaoStage;
-                if (model_sel < 0 && current.models.size() > 1 && !chao) model_sel = 0;
+                // A map's several models belong together in one world: a stage is
+                // the main landtable plus its animated-scenery auxiliaries
+                // (_uv/_ani/_x), and a Chao area is its room plus companion
+                // modules. Show them stacked so nothing goes missing. Ordinary
+                // multi-model files (characters, event scenes) still default to
+                // the first model so their parts don't pile at the origin.
+                bool is_map = e.section == Section::Maps;
+                if (model_sel < 0 && current.models.size() > 1 && !is_map) model_sel = 0;
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
                 // build the object-placement overlay and show it by default when a
