@@ -488,65 +488,89 @@ static std::string sibling(const std::string& path, const std::string& from,
     return fs::exists(p, ec) ? p : std::string();
 }
 
-// Chao areas keep their textures in per-area GVM archives named al_*_tex.prs
-// (ChaoStgHero -> al_stg_hero_tex.prs + al_hero_obj_tex.prs, and so on). The
-// module's own texture list gives the names in index order, so pool the
-// candidate archives and emit one image per list entry; that makes a part's
-// texture_id -- which indexes the list -- resolve to the right image.
-// The area's archives, loaded in the game's own order: the stage set first, then
-// the object set. Strip meshes carry a texture index straight into this pool;
-// Ginja modules index their own NJS_TEXLIST and get remapped onto it by name.
-static std::vector<Image> chao_texture_pool(const AssetEntry& e, const GameIndex& idx) {
-    std::string nl = lower(e.name);
-    std::string area;                       // "chaostghero.prs" -> "hero"
-    if (nl.rfind("chaostg", 0) == 0) {
-        area = nl.substr(7);
-        size_t dot = area.find('.');
-        if (dot != std::string::npos) area = area.substr(0, dot);
-    }
-    std::vector<std::string> want = {
-        "al_stg_" + area + "_tex.prs", "al_" + area + "_obj_tex.prs",
-        "al_stg_" + area + "_obj_tex.prs", "al_common_tex.prs", "al_env_tex.prs",
-    };
-    std::vector<Image> pool;
-    auto add = [&](const std::string& file) {
-        for (const auto& ae : idx.entries()) {
-            if (lower(ae.name) != file) continue;
-            std::vector<Image> imgs;
-            if (load_textures(ae.path, imgs))
-                for (auto& im : imgs) pool.push_back(std::move(im));
-            return;
-        }
-    };
-    for (const auto& w : want) add(w);
-    if (pool.empty()) {                     // fall back to anything for the area
-        for (const auto& ae : idx.entries()) {
-            std::string an = lower(ae.name);
-            if (an.rfind("al_", 0) != 0 || !ends_with(an, ".prs")) continue;
-            if (area.empty() || an.find(area) == std::string::npos) continue;
-            std::vector<Image> imgs;
-            if (load_textures(ae.path, imgs))
-                for (auto& im : imgs) pool.push_back(std::move(im));
+// Every Chao texture, indexed by name. The Chao system keeps its textures in ~70
+// small al_*tex*.prs GVM archives, and the per-area file naming is irregular (the
+// neutral race course uses al_stg_race_tex, the dark one al_stg_race_dark_tex,
+// and shared textures like water_a00 live in yet others). Because geometry binds
+// textures by *name* through each module's NJS_TEXLIST, the reliable approach is
+// to resolve names against a global pool rather than guess file names. Built once
+// per game folder and cached for the session.
+static const std::map<std::string, Image>& chao_global_textures(const GameIndex& idx) {
+    static std::map<std::string, std::map<std::string, Image>> cache;
+    auto it = cache.find(idx.root());
+    if (it != cache.end()) return it->second;
+    auto& pool = cache[idx.root()];
+    for (const auto& ae : idx.entries()) {
+        std::string an = lower(ae.name);
+        if (an.rfind("al_", 0) != 0 || !ends_with(an, ".prs")) continue;
+        if (an.find("tex") == std::string::npos) continue;
+        if (an.find("title") != std::string::npos ||
+            an.find("menu") != std::string::npos) continue;   // UI atlases, skip
+        std::vector<Image> imgs;
+        if (!load_textures(ae.path, imgs)) continue;
+        for (auto& im : imgs) {
+            std::string k = lower(im.name);
+            if (!k.empty()) pool.emplace(k, std::move(im));    // first wins
         }
     }
     return pool;
 }
 
-// A Ginja module's texture_id indexes its own list; rewrite it to index `pool`.
+// Resolve a module's texture list into images (placeholder for any name missing
+// from the pool, so list indices stay aligned).
+static std::vector<Image> resolve_texnames(const std::vector<std::string>& names,
+                                           const std::map<std::string, Image>& pool) {
+    std::vector<Image> out;
+    out.reserve(names.size());
+    for (const auto& nm : names) {
+        auto it = pool.find(lower(nm));
+        if (it != pool.end()) {
+            out.push_back(it->second);
+        } else {
+            Image ph;
+            ph.name = nm;
+            ph.width = ph.height = 1;
+            ph.rgba = {200, 200, 200, 255};
+            out.push_back(std::move(ph));
+        }
+    }
+    return out;
+}
+
+// A Ginja module's texture_id indexes its own texture list; rewrite it to index
+// `dest` (the asset's shared texture array) by matching names.
 static void remap_texture_ids(Model& m, const std::vector<std::string>& texnames,
-                              const std::vector<Image>& pool) {
+                              const std::vector<Image>& dest) {
     if (texnames.empty()) return;
     std::vector<int> map(texnames.size(), -1);
     for (size_t i = 0; i < texnames.size(); i++) {
         std::string w = lower(texnames[i]);
-        for (size_t j = 0; j < pool.size(); j++)
-            if (lower(pool[j].name) == w) { map[i] = (int)j; break; }
+        for (size_t j = 0; j < dest.size(); j++)
+            if (lower(dest[j].name) == w) { map[i] = (int)j; break; }
     }
     for (auto& part : m.parts)
         if (part.texture_id >= 0 && part.texture_id < (int)map.size())
             part.texture_id = map[part.texture_id];
 }
 
+// The area's own stage+object archives in game order, for the Lobby's strip
+// meshes whose texture_id is a direct index (they have no texture list).
+static std::vector<Image> chao_ordered_pool(const AssetEntry& e, const GameIndex& idx) {
+    std::string nl = lower(e.name);
+    std::string area = nl.rfind("chaostg", 0) == 0 ? nl.substr(7, nl.find('.') - 7) : "";
+    std::vector<Image> pool;
+    for (const std::string& f : {"al_stg_" + area + "_tex.prs",
+                                 "al_" + area + "_obj_tex.prs"}) {
+        for (const auto& ae : idx.entries()) {
+            if (lower(ae.name) != f) continue;
+            std::vector<Image> imgs;
+            if (load_textures(ae.path, imgs))
+                for (auto& im : imgs) pool.push_back(std::move(im));
+            break;
+        }
+    }
+    return pool;
+}
 
 
 bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
@@ -587,14 +611,22 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
     // are then ordinary GC "Ginja" with UVs and a texture list; the Lobby uses
     // the packed triangle-strip format instead.
     if (e.kind == AssetKind::ChaoStage) {
-        out.textures = chao_texture_pool(e, idx);
+        const auto& global = chao_global_textures(idx);
         auto add_chao = [&](const std::vector<uint8_t>& raw, const std::string& nm) {
             std::vector<uint8_t> img;
             if (!rel_relocate(raw.data(), raw.size(), img)) img = raw;
             Model m;
             std::vector<std::string> tn;
-            if (!load_chao_stage_gc(img, m, tn) && !load_chao_stage(img, m)) return false;
-            remap_texture_ids(m, tn, out.textures);   // Ginja ids -> pool ids
+            bool gc = load_chao_stage_gc(img, m, tn);
+            if (!gc && !load_chao_stage(img, m)) return false;
+            if (out.textures.empty()) {
+                // First module decides the texture array: a Ginja module's own
+                // texture list (resolved by name against the global pool), or the
+                // area's ordered archives for the Lobby's list-less strip meshes.
+                out.textures = tn.empty() ? chao_ordered_pool(e, idx)
+                                          : resolve_texnames(tn, global);
+            }
+            remap_texture_ids(m, tn, out.textures);   // Ginja ids -> shared array
             m.name = nm;
             out.models.push_back(std::move(m));
             return true;
