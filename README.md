@@ -41,6 +41,12 @@ verified by a batch regression that runs every parser over every shipped file.
   layout and drops a marker at every object/NPC, with an object list you can
   **zoom to**. (SA2 keeps the object *models* in `sonic2app.exe`, so the markers
   show placement, not the props themselves.)
+* **Drops characters and enemies into a map** — with a stage loaded, pick any
+  character, NPC or enemy and place it into the scene (posed to a standing frame,
+  textured, at the selected object's spot). Each one gets its own **zoom-to** and
+  a remove button, so you can stage a character in a level and frame it. (The SET
+  object *id → model* table is compiled into the game, so which enemy goes where
+  is chosen by hand, not auto-mapped.)
 * **Sky background** — an optional sky-gradient backdrop so maps sit against a
   sky instead of a black void (a stand-in; SA2's real per-stage skyboxes are
   compiled into the stage code, not shipped as loadable geometry).

@@ -109,10 +109,22 @@ struct DrawPart {
     float color[4]{1, 1, 1, 1};
 };
 
+// A character / NPC / enemy model dropped into the loaded map. Its geometry is
+// baked into world space (position + scale folded into the vertices) so it draws
+// like any other part; it carries its own textures.
+struct Actor {
+    std::string name;
+    std::vector<DrawPart> parts;
+    std::vector<GLTexture> textures;
+    float pos[3]{0, 0, 0};
+    float radius = 1.0f;
+};
+
 struct Scene {
     std::vector<DrawPart> parts;
     std::vector<DrawPart> markers;   // object-placement overlay (built from SET)
     std::vector<GLTexture> textures;
+    std::vector<Actor> actors;       // characters/NPCs placed into the map
     float center[3]{0, 0, 0};
     float radius = 1.0f;
     size_t tris = 0, verts = 0;
@@ -120,16 +132,29 @@ struct Scene {
     std::string title;
     std::vector<std::string> anim_names;
 
+    void clear_actors() {
+        for (auto& a : actors)
+            for (auto& t : a.textures) if (t.id) glDeleteTextures(1, &t.id);
+        actors.clear();
+    }
     void reset() {
         for (auto& t : textures) if (t.id) glDeleteTextures(1, &t.id);
         textures.clear();
         parts.clear();
         markers.clear();
+        clear_actors();
         tris = verts = 0;
         nodes = 0;
         anim_names.clear();
     }
 };
+
+static void log_line(const std::string& s);
+
+static std::string lower_str(std::string s) {
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
 
 static GLuint upload_texture(const Image& img) {
     GLuint id = 0;
@@ -142,6 +167,73 @@ static GLuint upload_texture(const Image& img) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
     return id;
+}
+
+// Build a placeable Actor from a freshly loaded character/enemy asset. Its
+// vertices are scaled about the model origin and translated to `pos`, so it lands
+// in the map's world space; textures are uploaded per-actor.
+static Actor make_actor(const LoadedAsset& la, const std::string& name,
+                        const float pos[3], float scale) {
+    Actor a;
+    a.name = name;
+    a.pos[0] = pos[0]; a.pos[1] = pos[1]; a.pos[2] = pos[2];
+    for (const auto& img : la.textures) {
+        GLTexture t;
+        t.id = img.valid() ? upload_texture(img) : 0;
+        a.textures.push_back(t);
+    }
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    // Pose the character to a standing frame first: SA2's raw bind pose is
+    // collapsed (which is what makes an un-posed character explode into spikes),
+    // so bake frame 0 of its longest applicable motion instead of model 0 as-is.
+    Model posed;
+    const Model* src = la.models.empty() ? nullptr : &la.models[0];
+    auto applicable = la.motions_for(0);
+    if (!applicable.empty() && !la.anim_data.empty() && !la.model_roots.empty()) {
+        int best = applicable[0];
+        for (int mi : applicable)
+            if (la.motions[mi].frame_count > la.motions[best].frame_count) best = mi;
+        NinjaBlob blob(la.anim_data, 0, true);
+        if (blob.build_model_posed(la.model_roots[0], &la.motions[best], 0.0f, posed))
+            src = &posed;
+    }
+    if (src) {
+        // First bake the scaled geometry and measure its bounds.
+        for (const auto& p : src->parts) {
+            DrawPart dp;
+            dp.pos = p.positions;
+            for (size_t i = 0; i + 2 < dp.pos.size(); i += 3)
+                for (int k = 0; k < 3; k++) {
+                    dp.pos[i + k] *= scale;
+                    lo[k] = std::min(lo[k], dp.pos[i + k]);
+                    hi[k] = std::max(hi[k], dp.pos[i + k]);
+                }
+            dp.nrm = p.normals;
+            dp.uv = p.uvs;
+            dp.idx.assign(p.indices.begin(), p.indices.end());
+            dp.tex = p.texture_id;
+            dp.double_sided = p.double_sided;
+            dp.blend = p.use_alpha;
+            uint32_t d = p.diffuse;
+            dp.color[0] = ((d >> 16) & 0xFF) / 255.0f;
+            dp.color[1] = ((d >> 8) & 0xFF) / 255.0f;
+            dp.color[2] = (d & 0xFF) / 255.0f;
+            dp.color[3] = ((d >> 24) & 0xFF) / 255.0f;
+            if (dp.color[3] <= 0.01f) dp.color[3] = 1.0f;
+            a.parts.push_back(std::move(dp));
+        }
+    }
+    // Translate so the model's centre lands on the placement point (a posed model
+    // is not centred on its local origin, so offsetting by pos alone would drop it
+    // far from where the camera then looks).
+    float ctr[3] = {(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+    float r = 1.0f;
+    for (int k = 0; k < 3; k++) { r = std::max(r, (hi[k] - lo[k]) * 0.5f); a.pos[k] = pos[k]; }
+    for (auto& dp : a.parts)
+        for (size_t i = 0; i + 2 < dp.pos.size(); i += 3)
+            for (int k = 0; k < 3; k++) dp.pos[i + k] += pos[k] - ctr[k];
+    a.radius = r;
+    return a;
 }
 
 // model_sel < 0 shows every model in the file; otherwise just that one.
@@ -347,9 +439,6 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
-    glMatrixMode(GL_PROJECTION);
-    float aspect = h > 0 ? (float)w / (float)h : 1.0f;
-    set_perspective(0.9f, aspect, sc.radius * 0.01f + 0.001f, sc.radius * 60.0f + 20.0f);
 
     glMatrixMode(GL_MODELVIEW);
     float ctr[3] = {sc.center[0], sc.center[1], sc.center[2]};
@@ -358,6 +447,15 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
         ctr[0] = cam.fpos[0]; ctr[1] = cam.fpos[1]; ctr[2] = cam.fpos[2];
         d = cam.fdist;
     }
+    // Near/far track the actual eye distance, not just the stage size: zooming to
+    // a small placed character (a few units) must not put it in front of a near
+    // plane sized for a 15000-unit stage, while the far plane still spans the map.
+    glMatrixMode(GL_PROJECTION);
+    float aspect = h > 0 ? (float)w / (float)h : 1.0f;
+    float znear = std::max(d * 0.02f, 0.02f);
+    float zfar = d + sc.radius * 8.0f + 100.0f;
+    set_perspective(0.9f, aspect, znear, zfar);
+    glMatrixMode(GL_MODELVIEW);   // set_lookat writes the current matrix
     float eye[3] = {ctr[0] + cosf(cam.pitch) * sinf(cam.yaw) * d,
                     ctr[1] + sinf(cam.pitch) * d,
                     ctr[2] + cosf(cam.pitch) * cosf(cam.yaw) * d};
@@ -393,16 +491,15 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
     // with depth writes OFF, so a translucent pane does not punch a hole in the
     // depth buffer and reveal the void behind it. A sub-1 diffuse alpha alone no
     // longer counts as "translucent".
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 0) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
-        else { glEnable(GL_BLEND); glDepthMask(GL_FALSE); }
-        for (const auto& p : sc.parts) {
+    auto draw_parts = [&](const std::vector<DrawPart>& parts,
+                          const std::vector<GLTexture>& texs, int pass) {
+        for (const auto& p : parts) {
             bool blend = p.blend;
             if ((pass == 0) == blend) continue;
             if (p.pos.empty() || p.idx.empty()) continue;
-            if (textured && p.tex >= 0 && p.tex < (int)sc.textures.size()) {
+            if (textured && p.tex >= 0 && p.tex < (int)texs.size() && texs[p.tex].id) {
                 glEnable(GL_TEXTURE_2D);
-                glBindTexture(GL_TEXTURE_2D, sc.textures[p.tex].id);
+                glBindTexture(GL_TEXTURE_2D, texs[p.tex].id);
             } else {
                 glDisable(GL_TEXTURE_2D);
             }
@@ -429,6 +526,12 @@ static void draw_scene(const Scene& sc, const Camera& cam, int w, int h,
             glDrawElements(GL_TRIANGLES, (GLsizei)p.idx.size(), GL_UNSIGNED_INT,
                            p.idx.data());
         }
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
+        else { glEnable(GL_BLEND); glDepthMask(GL_FALSE); }
+        draw_parts(sc.parts, sc.textures, pass);
+        for (const auto& a : sc.actors) draw_parts(a.parts, a.textures, pass);
     }
     // Object-placement markers: flat unlit cubes drawn over the geometry.
     if (show_objects && !sc.markers.empty()) {
@@ -632,6 +735,11 @@ int run_app() {
     bool show_backfaces = true;
     bool show_objects = false;   // overlay a stage's placed-object markers
     int object_sel = -1;         // highlighted object row
+    // "Load NPCs": characters/enemies dropped into the current map
+    char npc_filter[64] = "";
+    int actor_zoom = -1;         // highlighted placed-actor row
+    float npc_scale = 1.0f;      // scale applied to the next added actor
+    int loaded_idx = -1;         // index of the currently loaded asset entry
     bool sky_background = false;  // sky-gradient backdrop (auto-on for maps)
     bool show_settings = false;
     bool show_setup = index.entries().empty();
@@ -688,6 +796,7 @@ int run_app() {
             if (load_asset(e, index, la, &err)) {
                 player.stop();   // release the old clip before it is freed
                 current = std::move(la);
+                loaded_idx = pending;
                 // a single-model file needs no selector; multi-model files
                 // default to the first so parts do not stack at the origin
                 if (model_sel >= (int)current.models.size()) model_sel = -1;
@@ -718,6 +827,46 @@ int run_app() {
                         cam.fpos[1] = current.objects[oi].pos[1];
                         cam.fpos[2] = current.objects[oi].pos[2];
                         cam.fdist = std::max(scene.radius * 0.12f, 8.0f);
+                    }
+                }
+                // SA2VIEWER_NPC=<name substr>[,scale]: drop a character/enemy into
+                // the map and focus it (headless test of the NPC feature).
+                std::string enpc = get_env("SA2VIEWER_NPC");
+                if (!enpc.empty() && e.section == Section::Maps) {
+                    float nscale = 1.0f;
+                    size_t comma = enpc.find(',');
+                    if (comma != std::string::npos) {
+                        nscale = (float)atof(enpc.c_str() + comma + 1);
+                        enpc = enpc.substr(0, comma);
+                    }
+                    std::string want = lower_str(enpc);
+                    int found = -1;
+                    for (Section sec : {Section::Characters, Section::Enemies})
+                        for (int ci : index.in_section(sec, "", 100000)) {
+                            const auto& ce = index.entries()[ci];
+                            std::string nm = lower_str(ce.name);
+                            if (nm.rfind(want, 0) == 0) { found = ci; break; }  // prefix on file name
+                        }
+                    if (found < 0)
+                        for (Section sec : {Section::Characters, Section::Enemies})
+                            for (int ci : index.in_section(sec, "", 100000)) {
+                                const auto& ce = index.entries()[ci];
+                                if (lower_str(ce.display_name).find(want) != std::string::npos)
+                                    { found = ci; break; }
+                            }
+                    if (found >= 0) {
+                        const auto& ce = index.entries()[found];
+                        LoadedAsset na; std::string er;
+                        if (load_asset(ce, index, na, &er) && !na.models.empty()) {
+                            float at[3] = {scene.center[0], scene.center[1], scene.center[2]};
+                            if (!current.objects.empty())
+                                for (int k = 0; k < 3; k++) at[k] = current.objects[0].pos[k];
+                            Actor a = make_actor(na, ce.display_name, at, nscale);
+                            cam.focus = true;
+                            for (int k = 0; k < 3; k++) cam.fpos[k] = a.pos[k];
+                            cam.fdist = std::max(a.radius * 3.0f, 4.0f);
+                            scene.actors.push_back(std::move(a));
+                        }
                     }
                 }
                 // A texture archive has no geometry; show its texture grid so the
@@ -1098,6 +1247,73 @@ int run_app() {
             }
             ImGui::EndChild();
         }
+
+        // ---- NPCs / characters dropped into a loaded map ------------------
+        bool is_map_loaded = loaded_idx >= 0 && loaded_idx < (int)index.entries().size() &&
+                             index.entries()[loaded_idx].section == Section::Maps;
+        if (is_map_loaded) {
+            ImGui::Separator();
+            ImGui::Text("NPCs / characters in map (%d)", (int)scene.actors.size());
+            ImGui::TextDisabled("Add a character or enemy, then zoom to it.");
+            // placed actors: zoom / remove
+            for (int i = 0; i < (int)scene.actors.size(); i++) {
+                ImGui::PushID(i);
+                if (ImGui::SmallButton("zoom")) {
+                    cam.focus = true;
+                    for (int k = 0; k < 3; k++) cam.fpos[k] = scene.actors[i].pos[k];
+                    cam.fdist = std::max(scene.actors[i].radius * 3.0f, 4.0f);
+                    actor_zoom = i;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) {
+                    for (auto& t : scene.actors[i].textures)
+                        if (t.id) glDeleteTextures(1, &t.id);
+                    scene.actors.erase(scene.actors.begin() + i);
+                    ImGui::PopID();
+                    i--; continue;
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(scene.actors[i].name.c_str());
+                ImGui::PopID();
+            }
+            // picker: filter + list of characters and enemies
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##npcfilter", "filter characters / enemies...",
+                                     npc_filter, sizeof npc_filter);
+            ImGui::SliderFloat("scale", &npc_scale, 0.1f, 20.0f, "%.1fx");
+            ImGui::BeginChild("npcpick", ImVec2(0, 150 * cfg.ui_scale));
+            std::string flt = lower_str(npc_filter);
+            auto offer = [&](Section sec) {
+                for (int idx : index.in_section(sec, "", 100000)) {
+                    const auto& ce = index.entries()[idx];
+                    if (!flt.empty() && lower_str(ce.display_name).find(flt) == std::string::npos)
+                        continue;
+                    if (ImGui::Selectable((ce.display_name + "##" + std::to_string(idx)).c_str())) {
+                        LoadedAsset na;
+                        std::string er;
+                        if (load_asset(ce, index, na, &er) && !na.models.empty()) {
+                            // place at the selected object, else the map centre
+                            float at[3] = {scene.center[0], scene.center[1], scene.center[2]};
+                            if (object_sel >= 0 && object_sel < (int)current.objects.size())
+                                for (int k = 0; k < 3; k++) at[k] = current.objects[object_sel].pos[k];
+                            Actor a = make_actor(na, ce.display_name, at, npc_scale);
+                            cam.focus = true;
+                            for (int k = 0; k < 3; k++) cam.fpos[k] = a.pos[k];
+                            cam.fdist = std::max(a.radius * 3.0f, 4.0f);
+                            scene.actors.push_back(std::move(a));
+                            actor_zoom = (int)scene.actors.size() - 1;
+                            status = "Added " + ce.display_name;
+                        } else {
+                            status = "Could not load " + ce.display_name;
+                        }
+                    }
+                }
+            };
+            offer(Section::Characters);
+            offer(Section::Enemies);
+            ImGui::EndChild();
+        }
+
         ImGui::Separator();
         if (ImGui::Button("Export FBX") && !current.models.empty()) {
             std::error_code ec;

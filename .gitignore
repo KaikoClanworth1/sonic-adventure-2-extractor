@@ -47,3 +47,6 @@ __pycache__/
 *.ilk
 *.idb
 *.log
+
+# user-supplied third-party reference material
+/Referance/
