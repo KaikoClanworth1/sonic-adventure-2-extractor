@@ -326,15 +326,27 @@ GCVertexSet (16, ends at attribute 0xFF/0): u8 attribute (1=Pos,2=Normal,
                  u32 structure (structType=&0xF, dataType=(>>4)&0xF),
                  u32 dataPtr, u32 dataLen
 GCMesh (16): u32 paramPtr, i32 paramCount, u32 primPtr, u32 primSize
-GCParameter (8): u8 type (0=VtxAttrFmt,1=IndexFlags,2=Lighting,4=BlendAlpha,
-                 5=Colour,8=Texture,10=TexCoordGen), u32 data
+GCParameter (8): u8 type (1=IndexAttributeFlags, 2=Lighting, 4=BlendAlpha,
+                 5=AmbientColor, 8=Texture, 10=MipMap), u32 data
 ```
 
-Positions/normals are float32 XYZ; colours RGBA8; UVs are int16/256. The display
+Positions/normals are float32 XYZ; colours RGBA8; UVs are int16/255. The display
 list is **big-endian GX** everywhere: `u8 opcode` (0x90 triangles, 0x98 strip,
 0xA0 fan), `u16 count`, then per-vertex indices whose presence and width come from
-the **sticky** IndexAttributeFlags (2 bits per GX slot; the value persists across
-meshes until another parameter changes it).
+the **sticky** IndexAttributeFlags (2 bits per GX slot — `1<<3` HasPosition with
+`1<<2` for a 16-bit index, then normal, colour and UV at `1<<5`/`1<<7`/`1<<11`;
+the value persists across meshes until another parameter changes it).
+
+Parameter details worth knowing: the Texture param is `{u16 textureId, u16
+tileMode}` (tile mode is wrap/mirror per axis only). BlendAlpha's `1<<14` is the
+"use alpha" bit. Lighting's two presets are `0x0b11` (unlit, vertex-coloured) and
+`0x0011` (lit by normals), which is where the `ignore_light` bit comes from. There
+is **no environment-mapping flag** among these parameters — an earlier version of
+this parser wrongly derived one from type 10, which is actually MipMap.
+
+The parameter numbering, `Decode255` UV scale and index-flag layout above were
+cross-checked against [SAModelTools](https://github.com/tge-was-taken/SAModelTools)
+(`SAModelLibrary/GeometryFormats/GC/`), which agrees with what was derived here.
 
 ## 9. SET object placement
 

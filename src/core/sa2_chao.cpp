@@ -52,9 +52,10 @@ struct BE {
 };
 
 // A corner is { u16 positionIdx, u16 u, u16 v }. The trailing two are NOT
-// indices: they are the corner's texture coordinates in GameCube's fixed-point
-// ST format (8 fractional bits), so u/256 and v/256 give 0..1 (slightly over for
-// tiling). That is why the file contains no UV array.
+// indices: they are the corner's texture coordinates in SA's fixed-point form,
+// decoded by dividing by 255 (so 0/127/255 give 0.0/0.5/1.0 exactly, and values
+// above 255 tile) - the same Decode255 the SA model tools use. That is why the
+// file contains no UV array to point at.
 struct Corner { int p; uint16_t u, v; };
 struct Group { bool rev; std::vector<Corner> corners; };
 
@@ -236,8 +237,8 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
                 part.normals.push_back(b.f32(e + 12));
                 part.normals.push_back(b.f32(e + 16));
                 part.normals.push_back(b.f32(e + 20));
-                part.uvs.push_back(c.u / 256.0f);
-                part.uvs.push_back(c.v / 256.0f);
+                part.uvs.push_back(c.u / 255.0f);
+                part.uvs.push_back(c.v / 255.0f);
                 it = seen.emplace(key, vi).first;
             }
             part.indices.push_back(it->second);

@@ -195,17 +195,23 @@ static void parse_meshes(const NinjaBlob& b, uint32_t ptr, int count,
                 if (pe + 8 > n) break;
                 uint8_t ptype = b.raw()[pe];
                 uint32_t data = b.u32(pe + 4);
+                // Param types: 1 IndexAttributeFlags, 2 Lighting, 4 BlendAlpha,
+                // 5 AmbientColor, 8 Texture, 10 MipMap. Note there is no
+                // environment-mapping flag among them -- env_map stays off here.
                 switch (ptype) {
                     case 1: index_flags = data; break;                 // IndexFlags
-                    case 8: cur_tex = (int)(data & 0xFFFF); break;     // Texture
-                    case 5: ambient = data; break;                     // Colour
-                    case 2: ignore_light = ((data >> 8) & 0x01) != 0; break;
+                    case 8: cur_tex = (int)(data & 0xFFFF); break;     // Texture id
+                    case 5: ambient = data; break;                     // AmbientColor
+                    case 2:                                            // Lighting
+                        // 0x0b11 = the "colours" preset (unlit, vertex-coloured);
+                        // 0x0011 = the "normals" preset (lit).
+                        ignore_light = ((data >> 8) & 0x01) != 0;
+                        break;
                     case 4:                                            // BlendAlpha
                         blend_dst = (int)((data >> 8) & 7);
                         blend_src = (int)((data >> 11) & 7);
-                        use_alpha = use_alpha || ((data & 0x4000) != 0);
+                        use_alpha = use_alpha || ((data & 0x4000) != 0);   // UseAlpha = 1<<14
                         break;
-                    case 10: env_map = (((data >> 4) & 0xFF) == 1); break;
                 }
             }
         }
