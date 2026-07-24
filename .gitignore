@@ -50,3 +50,6 @@ __pycache__/
 
 # user-supplied third-party reference material
 /Referance/
+
+# generated from the user's own game exe - game-derived, never commit
+sa2_objects.json
