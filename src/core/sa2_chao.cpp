@@ -51,7 +51,12 @@ struct BE {
     }
 };
 
-struct Group { bool rev; std::vector<int> corners; };
+// A corner is { u16 positionIdx, u16 u, u16 v }. The trailing two are NOT
+// indices: they are the corner's texture coordinates in GameCube's fixed-point
+// ST format (8 fractional bits), so u/256 and v/256 give 0..1 (slightly over for
+// tiling). That is why the file contains no UV array.
+struct Corner { int p; uint16_t u, v; };
+struct Group { bool rev; std::vector<Corner> corners; };
 
 // Parse the strip groups starting at a group-count offset. Returns false unless
 // every group parses within bounds.
@@ -72,10 +77,10 @@ bool parse_groups(const BE& b, size_t G, std::vector<Group>& groups, int& maxpos
         grp.rev = sc < 0;
         grp.corners.reserve(cnt);
         for (int v = 0; v < cnt; v++) {
-            int pi = b.u16(p);
+            Corner c{b.u16(p), b.u16(p + 2), b.u16(p + 4)};
             p += 6;
-            grp.corners.push_back(pi);
-            if (pi > maxpos) maxpos = pi;
+            grp.corners.push_back(c);
+            if (c.p > maxpos) maxpos = c.p;
         }
         groups.push_back(std::move(grp));
     }
@@ -83,17 +88,33 @@ bool parse_groups(const BE& b, size_t G, std::vector<Group>& groups, int& maxpos
     return true;
 }
 
-void strip_tris(const std::vector<Group>& groups, std::vector<uint32_t>& tris) {
+void strip_tris(const std::vector<Group>& groups, std::vector<Corner>& tris) {
     for (const auto& g : groups) {
         const auto& c = g.corners;
         for (size_t k = 0; k + 2 < c.size(); k++) {
-            int a = c[k], b2 = c[k + 1], cc = c[k + 2];
+            Corner a = c[k], b2 = c[k + 1], cc = c[k + 2];
             if (((k % 2 == 1) ? 1 : 0) ^ (g.rev ? 1 : 0)) std::swap(a, b2);
-            if (a != b2 && b2 != cc && a != cc) {
+            if (a.p != b2.p && b2.p != cc.p && a.p != cc.p) {
                 tris.push_back(a); tris.push_back(b2); tris.push_back(cc);
             }
         }
     }
+}
+
+// Each mesh's material block opens with a word of the form 0x25xx00tt / 0x21xx00tt
+// (it sits a fixed distance before the group count, after the node's 1,1,1/0,0,0
+// scale+rotation). The low half is the mesh's texture index.
+int texture_index_before(const BE& b, size_t group_count_off) {
+    size_t lo = group_count_off > 0x40 ? group_count_off - 0x40 : 0;
+    for (size_t a = group_count_off - 4; a > lo; a -= 2) {
+        if (a + 4 > b.n) continue;
+        uint8_t top = b.d[a];
+        if ((top == 0x25 || top == 0x21) && b.d[a + 2] == 0x00) {
+            int t = b.d[a + 3];
+            if (t < 256) return t;
+        }
+    }
+    return -1;
 }
 
 }  // namespace
@@ -141,7 +162,7 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
     };
 
     // 2) scan every group-count candidate, keep the most-triangles parse per block
-    struct Best { size_t ntris; int need; std::vector<uint32_t> tris; };
+    struct Best { size_t ntris; int need; std::vector<Corner> tris; int tex; };
     std::map<size_t, Best> best;
     for (size_t G = 4; G + 8 < n; G += 2) {
         int gc = b.u16(G);
@@ -156,18 +177,17 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
         int need = maxpos + 1;
         size_t V = block_for((end + 3) & ~size_t(3), need);
         if (V == SIZE_MAX) continue;
-        std::vector<uint32_t> tris;
+        std::vector<Corner> tris;
         strip_tris(groups, tris);
         auto it = best.find(V);
         if (it == best.end() || tris.size() > it->second.ntris)
-            best[V] = Best{tris.size(), need, std::move(tris)};
+            best[V] = Best{tris.size(), need, std::move(tris), texture_index_before(b, G)};
     }
 
     // 3) emit one MeshPart per block, dropping incoherent parses
     for (auto& kv : best) {
         size_t V = kv.first;
-        int need = kv.second.need;
-        std::vector<uint32_t>& tris = kv.second.tris;
+        std::vector<Corner>& tris = kv.second.tris;
 
         // coherence filter: real strips have short, uniform edges; a garbage parse
         // links distant verts. Drop long-edge triangles; reject the whole mesh if
@@ -175,21 +195,21 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
         if (tris.size() >= 24) {
             std::vector<float> elen;
             elen.reserve(tris.size() / 3);
-            auto dist = [&](uint32_t a, uint32_t c) {
+            auto dist = [&](int a, int c) {
                 float dx = b.f32(V + a * 24) - b.f32(V + c * 24);
                 float dy = b.f32(V + a * 24 + 4) - b.f32(V + c * 24 + 4);
                 float dz = b.f32(V + a * 24 + 8) - b.f32(V + c * 24 + 8);
                 return std::sqrt(dx * dx + dy * dy + dz * dz);
             };
             for (size_t t = 0; t + 2 < tris.size(); t += 3)
-                elen.push_back(std::max({dist(tris[t], tris[t + 1]),
-                                         dist(tris[t + 1], tris[t + 2]),
-                                         dist(tris[t], tris[t + 2])}));
+                elen.push_back(std::max({dist(tris[t].p, tris[t + 1].p),
+                                         dist(tris[t + 1].p, tris[t + 2].p),
+                                         dist(tris[t].p, tris[t + 2].p)}));
             std::vector<float> sorted = elen;
             std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
             float med = sorted[sorted.size() / 2];
             float thresh = std::max(med * 8.0f, 1e-3f);
-            std::vector<uint32_t> keep;
+            std::vector<Corner> keep;
             for (size_t e = 0; e < elen.size(); e++)
                 if (elen[e] <= thresh) {
                     keep.push_back(tris[e * 3]); keep.push_back(tris[e * 3 + 1]);
@@ -200,18 +220,29 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
         }
         if (tris.empty()) continue;
 
+        // UVs live on the corner, so a vertex is (position, u, v): split shared
+        // positions that carry different texture coordinates.
         MeshPart part;
-        part.positions.reserve(need * 3);
-        part.normals.reserve(need * 3);
-        for (int i = 0; i < need; i++) {
-            part.positions.push_back(b.f32(V + i * 24));
-            part.positions.push_back(b.f32(V + i * 24 + 4));
-            part.positions.push_back(b.f32(V + i * 24 + 8));
-            part.normals.push_back(b.f32(V + i * 24 + 12));
-            part.normals.push_back(b.f32(V + i * 24 + 16));
-            part.normals.push_back(b.f32(V + i * 24 + 20));
+        std::map<uint64_t, uint32_t> seen;
+        for (const Corner& c : tris) {
+            uint64_t key = ((uint64_t)(uint32_t)c.p << 32) | ((uint32_t)c.u << 16) | c.v;
+            auto it = seen.find(key);
+            if (it == seen.end()) {
+                uint32_t vi = (uint32_t)(part.positions.size() / 3);
+                size_t e = V + (size_t)c.p * 24;
+                part.positions.push_back(b.f32(e));
+                part.positions.push_back(b.f32(e + 4));
+                part.positions.push_back(b.f32(e + 8));
+                part.normals.push_back(b.f32(e + 12));
+                part.normals.push_back(b.f32(e + 16));
+                part.normals.push_back(b.f32(e + 20));
+                part.uvs.push_back(c.u / 256.0f);
+                part.uvs.push_back(c.v / 256.0f);
+                it = seen.emplace(key, vi).first;
+            }
+            part.indices.push_back(it->second);
         }
-        part.indices = std::move(tris);
+        part.texture_id = kv.second.tex;
         part.double_sided = true;   // Chao stage walls are single-sided in-game
         part.node_index = (int)out.parts.size();
         out.parts.push_back(std::move(part));

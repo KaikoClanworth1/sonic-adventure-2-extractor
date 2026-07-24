@@ -485,9 +485,10 @@ static std::string sibling(const std::string& path, const std::string& from,
 // module's own texture list gives the names in index order, so pool the
 // candidate archives and emit one image per list entry; that makes a part's
 // texture_id -- which indexes the list -- resolve to the right image.
-static void load_chao_textures(const AssetEntry& e, const GameIndex& idx,
-                               const std::vector<std::string>& texnames,
-                               std::vector<Image>& out) {
+// The area's archives, loaded in the game's own order: the stage set first, then
+// the object set. Strip meshes carry a texture index straight into this pool;
+// Ginja modules index their own NJS_TEXLIST and get remapped onto it by name.
+static std::vector<Image> chao_texture_pool(const AssetEntry& e, const GameIndex& idx) {
     std::string nl = lower(e.name);
     std::string area;                       // "chaostghero.prs" -> "hero"
     if (nl.rfind("chaostg", 0) == 0) {
@@ -495,40 +496,50 @@ static void load_chao_textures(const AssetEntry& e, const GameIndex& idx,
         size_t dot = area.find('.');
         if (dot != std::string::npos) area = area.substr(0, dot);
     }
+    std::vector<std::string> want = {
+        "al_stg_" + area + "_tex.prs", "al_" + area + "_obj_tex.prs",
+        "al_stg_" + area + "_obj_tex.prs", "al_common_tex.prs", "al_env_tex.prs",
+    };
     std::vector<Image> pool;
-    for (const auto& ae : idx.entries()) {
-        std::string an = lower(ae.name);
-        if (an.rfind("al_", 0) != 0 || !ends_with(an, ".prs")) continue;
-        if (an.find("_tex") == std::string::npos && an.find("tex_") == std::string::npos)
-            continue;
-        bool want = (!area.empty() && an.find(area) != std::string::npos) ||
-                    an == "al_common_tex.prs" || an == "al_env_tex.prs" ||
-                    an == "al_tex_common.prs";
-        if (!want) continue;
-        std::vector<Image> imgs;
-        if (load_textures(ae.path, imgs))
-            for (auto& im : imgs) pool.push_back(std::move(im));
-    }
-    if (texnames.empty()) {                 // no list (Lobby strips): show them all
-        out = std::move(pool);
-        return;
-    }
-    for (const auto& want : texnames) {
-        std::string w = lower(want);
-        const Image* hit = nullptr;
-        for (const auto& im : pool)
-            if (lower(im.name) == w) { hit = &im; break; }
-        if (hit) {
-            out.push_back(*hit);
-        } else {                            // keep list indices aligned
-            Image ph;
-            ph.name = want;
-            ph.width = ph.height = 1;
-            ph.rgba = {255, 255, 255, 255};
-            out.push_back(std::move(ph));
+    auto add = [&](const std::string& file) {
+        for (const auto& ae : idx.entries()) {
+            if (lower(ae.name) != file) continue;
+            std::vector<Image> imgs;
+            if (load_textures(ae.path, imgs))
+                for (auto& im : imgs) pool.push_back(std::move(im));
+            return;
+        }
+    };
+    for (const auto& w : want) add(w);
+    if (pool.empty()) {                     // fall back to anything for the area
+        for (const auto& ae : idx.entries()) {
+            std::string an = lower(ae.name);
+            if (an.rfind("al_", 0) != 0 || !ends_with(an, ".prs")) continue;
+            if (area.empty() || an.find(area) == std::string::npos) continue;
+            std::vector<Image> imgs;
+            if (load_textures(ae.path, imgs))
+                for (auto& im : imgs) pool.push_back(std::move(im));
         }
     }
+    return pool;
 }
+
+// A Ginja module's texture_id indexes its own list; rewrite it to index `pool`.
+static void remap_texture_ids(Model& m, const std::vector<std::string>& texnames,
+                              const std::vector<Image>& pool) {
+    if (texnames.empty()) return;
+    std::vector<int> map(texnames.size(), -1);
+    for (size_t i = 0; i < texnames.size(); i++) {
+        std::string w = lower(texnames[i]);
+        for (size_t j = 0; j < pool.size(); j++)
+            if (lower(pool[j].name) == w) { map[i] = (int)j; break; }
+    }
+    for (auto& part : m.parts)
+        if (part.texture_id >= 0 && part.texture_id < (int)map.size())
+            part.texture_id = map[part.texture_id];
+}
+
+
 
 bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
                 std::string* error) {
@@ -568,14 +579,14 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
     // are then ordinary GC "Ginja" with UVs and a texture list; the Lobby uses
     // the packed triangle-strip format instead.
     if (e.kind == AssetKind::ChaoStage) {
-        std::vector<std::string> texnames;
+        out.textures = chao_texture_pool(e, idx);
         auto add_chao = [&](const std::vector<uint8_t>& raw, const std::string& nm) {
             std::vector<uint8_t> img;
             if (!rel_relocate(raw.data(), raw.size(), img)) img = raw;
             Model m;
             std::vector<std::string> tn;
             if (!load_chao_stage_gc(img, m, tn) && !load_chao_stage(img, m)) return false;
-            if (texnames.empty()) texnames = std::move(tn);
+            remap_texture_ids(m, tn, out.textures);   // Ginja ids -> pool ids
             m.name = nm;
             out.models.push_back(std::move(m));
             return true;
@@ -596,7 +607,6 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
                 }
             }
         }
-        load_chao_textures(e, idx, texnames, out.textures);
         return true;
     }
 
