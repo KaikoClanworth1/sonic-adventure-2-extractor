@@ -404,12 +404,46 @@ space (concentric tiers about the Y axis), so they merge directly. Validated in
 Blender against `ChaoStgLobby` (10 meshes / 1234 tris — the arched lobby building
 + platform); Karate and Kinder decode with minor heuristic artifacts.
 
-Two things are **not** solved: the **Hero/Dark gardens** (and Entrance) use a
-different, pos-only (stride-12) format with separate normal/UV arrays — the
-strip decoder finds nothing in them; and small-object **placement** lives in a
-scene graph at header `+0x24/+0x28` whose pointers are `0x80xxxxxx` GameCube RAM
-addresses spanning a larger loaded image, so it is not cleanly relocatable per
-file (small props therefore pile at the origin; the building itself is correct).
+Small-object **placement** is not solved: it lives in a scene graph whose pointers
+are `0x80xxxxxx` GameCube RAM addresses spanning a larger loaded image, so it is
+not cleanly relocatable per file (small props pile at the origin; the building
+geometry itself is correct world space).
+
+### 11.1 The Hero/Dark gardens are a different format, and are code-bound
+
+The gardens (and Entrance) do **not** use the strip format above. They are
+ordinary GC "Ginja" — the same family as [§6](#6-gc-ginja-stage-models) — laid out
+per mesh as a 16-byte vertex-set descriptor array, an 8-byte GCParameter block,
+then raw GX display lists:
+
+```
+descriptor: u8 attr, u8 stride, u16 count, u32 flags, u32 data_ptr, u32 data_size
+            (POS flags 0x41, COLOR0 0xa6, TEX0 0x38; array ends with attr 0xFF)
+```
+
+The display lists decode fine (`0x90` triangles / `0x98` strips; `IndexFlags`
+0x888 selects slots 1/3/5 at 8 bits each, so each corner is three bytes —
+`posIdx, colIdx, uvIdx`), and the parameter types match the stage parser's.
+
+**What blocks them: every descriptor's `data_ptr` is NULL in the file.** The
+vertex arrays are bound to their descriptors by the module's compiled PowerPC
+code at load time, and nothing in the file records that binding:
+
+* The relocation table at header `+0x24` is a GameCube REL relocation list
+  (`{u16 offsetDelta, u8 type, u8 section, u32 addend}`, `0xCA` =
+  R_DOLPHIN_SECTION, `0xCB` = end) containing only **code** relocations —
+  `0x0a` REL24 and `0x04`/`0x06` ADDR16_LO/HA against external `0x80xxxxxx`
+  functions. Zero of its 84 sites touch a `data_ptr` field.
+* The 1008-entry block table (`{u32 offset, u16 size, u16 0x0105}`) does not
+  encode it either: 74 of 171 descriptors have no block of matching size.
+* The data is physically present (~2180 vertices against 1742 needed, in ~100
+  runs interleaved with the mesh blocks), but recovering the pairing
+  heuristically fails — the median distance to the nearest exact-count run is
+  5.6 KB, and scoring candidates by geometric coherence does not separate the
+  correct one.
+
+So decoding the gardens requires disassembling the Chao module's init code, not
+further format probing.
 
 ## 12. What is not implemented
 
