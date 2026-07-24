@@ -409,7 +409,40 @@ are `0x80xxxxxx` GameCube RAM addresses spanning a larger loaded image, so it is
 not cleanly relocatable per file (small props pile at the origin; the building
 geometry itself is correct world space).
 
-### 11.1 The Hero/Dark gardens are a different format, and are code-bound
+### 11.1 Every Chao file is a GameCube REL module — relocate first
+
+This is the master key, and it is easy to miss: **`ChaoStg*.prs` are GameCube REL
+modules that happen to be PRS-compressed**, and `ChaoMain.prs` / `ChaoStgLobby.rel`
+are too. The word at offset 0 is the module id (Lobby 64, Hero 62, Dark 63 …), and
+the rest of the REL v2 header follows exactly: `+0x0c` section count, `+0x10`
+section table, `+0x1c` version, `+0x24` relocation data, `+0x28` imports.
+
+Nothing in these files can be read until [`rel_relocate`](../src/core/sa2_stage.cpp)
+has run, because **the vertex-set data pointers are NULL on disk** — they are
+filled in by the module's own relocations. The trap is that the relocation data
+holds several sub-streams, one per imported module: the first (module 0) is all
+*code* relocations against external `0x80xxxxxx` addresses, which looks like proof
+that the data is bound by compiled code. It isn't — the **self-module** stream
+(the import whose id equals the module's own) is a separate block later in the
+same region, and its `R_PPC_ADDR32` entries are what turn the NULL pointers into
+file offsets. Applying only the self-module stream (which `rel_relocate` already
+did for stage RELs) fills in every pointer.
+
+Once relocated, most Chao areas are ordinary GC "Ginja" — [§6](#6-gc-ginja-stage-models)
+geometry with UVs and a texture list — and the existing `build_gc_model` reads
+them unchanged. Only the Lobby room itself uses the pointer-free strip format of
+§11 above. Texture data lives in per-area GVM archives named `al_*_tex.prs`
+(`ChaoStgHero` → `al_stg_hero_tex.prs` + `al_hero_obj_tex.prs`), and the module's
+own `NJS_TEXLIST` gives the names in index order, so a part's `texture_id` is
+resolved by matching that list against the pooled archives by name.
+
+The Chao **Lobby is split across modules**: the room is `ChaoStgLobby.prs`, more
+of it is in `ChaoStgLobby.rel`, and the garden gates are in the
+`ChaoStgLobby{000,00K,0DK,H0K,HDK}` variants (the suffix is which of Hero/Dark/
+Kindergarten are unlocked); the loader merges the room, the `.rel` and the HDK
+variant so "Chao World: Lobby" is the whole lobby.
+
+### 11.2 Historical note: the gardens are *not* code-bound
 
 The gardens (and Entrance) do **not** use the strip format above. They are
 ordinary GC "Ginja" — the same family as [§6](#6-gc-ginja-stage-models) — laid out
@@ -425,25 +458,14 @@ The display lists decode fine (`0x90` triangles / `0x98` strips; `IndexFlags`
 0x888 selects slots 1/3/5 at 8 bits each, so each corner is three bytes —
 `posIdx, colIdx, uvIdx`), and the parameter types match the stage parser's.
 
-**What blocks them: every descriptor's `data_ptr` is NULL in the file.** The
-vertex arrays are bound to their descriptors by the module's compiled PowerPC
-code at load time, and nothing in the file records that binding:
-
-* The relocation table at header `+0x24` is a GameCube REL relocation list
-  (`{u16 offsetDelta, u8 type, u8 section, u32 addend}`, `0xCA` =
-  R_DOLPHIN_SECTION, `0xCB` = end) containing only **code** relocations —
-  `0x0a` REL24 and `0x04`/`0x06` ADDR16_LO/HA against external `0x80xxxxxx`
-  functions. Zero of its 84 sites touch a `data_ptr` field.
-* The 1008-entry block table (`{u32 offset, u16 size, u16 0x0105}`) does not
-  encode it either: 74 of 171 descriptors have no block of matching size.
-* The data is physically present (~2180 vertices against 1742 needed, in ~100
-  runs interleaved with the mesh blocks), but recovering the pairing
-  heuristically fails — the median distance to the nearest exact-count run is
-  5.6 KB, and scoring candidates by geometric coherence does not separate the
-  correct one.
-
-So decoding the gardens requires disassembling the Chao module's init code, not
-further format probing.
+Every descriptor's `data_ptr` is NULL in the raw file, which is easy to
+misdiagnose as "the arrays are bound by compiled code at load time". They are
+not — see §11.1: the pointers are filled by the module's **self-module** REL
+relocation stream, which is a different sub-stream from the module-0 (external
+code) one. Reading only the module-0 stream shows nothing but REL24/ADDR16_LO/HA
+relocations against `0x80xxxxxx` functions and none touching a `data_ptr`, which
+is what makes the wrong conclusion look well-supported. Relocate with the
+self-module stream and all of them resolve.
 
 ## 12. What is not implemented
 

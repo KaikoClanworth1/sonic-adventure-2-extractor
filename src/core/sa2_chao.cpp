@@ -221,4 +221,96 @@ bool load_chao_stage(const std::vector<uint8_t>& data, Model& out) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GC "Ginja" Chao areas (everything except the Lobby): once the module's
+// self-relocations are applied the ordinary GC model walker can read them, so we
+// only need to locate the node roots and pull the texture-list names.
+
+namespace {
+
+// A node whose attach is a valid GC attach, and which nothing else references as
+// a child/sibling, is a model root.
+std::vector<uint32_t> find_gc_roots(const NinjaBlob& b) {
+    size_t n = b.size();
+    std::vector<uint32_t> nodes;
+    for (size_t a = 0; a + 0x34 <= n; a += 4) {
+        uint32_t attach = b.u32(a + 4);
+        if (!b.ok(attach) || !b.valid_gc_attach(attach)) continue;
+        uint32_t child = b.u32(a + 0x2C), sib = b.u32(a + 0x30);
+        if (child && !b.ok(child)) continue;
+        if (sib && !b.ok(sib)) continue;
+        nodes.push_back((uint32_t)a);
+    }
+    // drop anything reachable as a child/sibling: those are not roots
+    std::vector<uint32_t> child_of;
+    for (uint32_t a : nodes) {
+        uint32_t c = b.u32(a + 0x2C), s = b.u32(a + 0x30);
+        if (c) child_of.push_back(c);
+        if (s) child_of.push_back(s);
+    }
+    std::sort(child_of.begin(), child_of.end());
+    std::vector<uint32_t> roots;
+    for (uint32_t a : nodes)
+        if (!std::binary_search(child_of.begin(), child_of.end(), a))
+            roots.push_back(a);
+    return roots;
+}
+
+// NJS_TEXLIST: { NJS_TEXNAME* names, u32 count }, each name { char* , 0, 0 }.
+// Returns the longest well-formed list, which is the stage's own.
+std::vector<std::string> find_texture_names(const NinjaBlob& b) {
+    size_t n = b.size();
+    const uint8_t* d = b.raw().data();
+    std::vector<std::string> best;
+    auto cstr = [&](uint32_t p, std::string& s) {
+        if (!b.ok(p)) return false;
+        size_t o = b.off(p);
+        s.clear();
+        while (o < n && d[o] && s.size() < 40) {
+            char c = (char)d[o++];
+            if (c < 32 || c > 126) return false;
+            s.push_back(c);
+        }
+        return s.size() >= 3;
+    };
+    for (size_t a = 0; a + 8 <= n; a += 4) {
+        uint32_t p = b.u32(a), cnt = b.u32(a + 4);
+        if (!b.ok(p) || cnt == 0 || cnt > 512) continue;
+        if (b.off(p) + (size_t)cnt * 12 > n) continue;
+        std::vector<std::string> names;
+        bool ok = true;
+        for (uint32_t i = 0; i < cnt && ok; i++) {
+            std::string s;
+            if (!cstr(b.u32(b.off(p) + (size_t)i * 12), s)) ok = false;
+            else names.push_back(s);
+        }
+        if (ok && names.size() > best.size()) best = std::move(names);
+    }
+    return best;
+}
+
+}  // namespace
+
+bool load_chao_stage_gc(const std::vector<uint8_t>& relocated, Model& out,
+                        std::vector<std::string>& texture_names) {
+    NinjaBlob b(relocated, 0, /*big_endian=*/true);
+    texture_names = find_texture_names(b);
+    for (uint32_t root : find_gc_roots(b)) {
+        Model m;
+        if (!b.build_gc_model(root, m)) continue;
+        int nbase = (int)out.nodes.size();
+        for (auto nd : m.nodes) {
+            if (nd.parent >= 0) nd.parent += nbase;
+            nd.index += nbase;
+            out.nodes.push_back(nd);
+        }
+        for (auto& part : m.parts) {
+            part.node_index += nbase;
+            out.parts.push_back(std::move(part));
+        }
+        if (out.parts.size() > 8000) break;
+    }
+    return !out.parts.empty();
+}
+
 }  // namespace sa2

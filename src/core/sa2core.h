@@ -198,6 +198,17 @@ std::vector<LandTableInfo> find_landtables(const NinjaBlob& blob);
 bool build_landtable(const NinjaBlob& blob, const LandTableInfo& lt, Model& out);
 
 // ---------------------------------------------------------------- Chao stages
+// Chao files are GameCube REL modules (the .prs ones just PRS-compressed), so
+// rel_relocate() must run before anything can be read: it is what fills in the
+// vertex-set data pointers, which are NULL on disk. Most areas then hold ordinary
+// GC "Ginja" geometry (with UVs and a texture list); the Lobby instead uses the
+// packed triangle-strip format handled by load_chao_stage below.
+//
+// Builds every GC model in an already-relocated Chao image, and reports the
+// module's texture-list names in list order so the caller can bind the right
+// texture to each part's texture_id.
+bool load_chao_stage_gc(const std::vector<uint8_t>& relocated, Model& out,
+                        std::vector<std::string>& texture_names);
 // Decodes Chao World stage geometry (ChaoStgLobby/Karate/Kinder .prs, already
 // PRS-decompressed) into world-space meshes. These files pack triangle-strip
 // meshes with interleaved pos+normal vertex blocks and no pointer tables (see

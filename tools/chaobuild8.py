@@ -6,7 +6,11 @@ import sys, os, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sa2fmt import prs_decompress
 
-d = bytes(prs_decompress(open(sys.argv[1], "rb").read()))
+_raw = open(sys.argv[1], "rb").read()
+try:
+    d = bytes(prs_decompress(_raw))          # .prs
+except Exception:
+    d = _raw                                  # already-decompressed / relocated image
 n = len(d)
 f32 = lambda o: struct.unpack_from(">f", d, o)[0]
 be16 = lambda o: struct.unpack_from(">H", d, o)[0]

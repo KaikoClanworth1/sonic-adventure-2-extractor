@@ -20,11 +20,14 @@ verified by a batch regression that runs every parser over every shipped file.
 * **Extracts whole stages** — GameCube REL relocation, GC "Ginja" geometry and
   LandTables, including the animated-scenery `_uv`/`_ani`/`_x` sub-tables and the
   matching object placement (SET files).
-* **Renders Chao World** — the Chao Lobby / Karate / Kindergarten geometry
-  (`ChaoStg*.prs`, a tableless triangle-strip format reverse-engineered from
-  scratch; see [FORMATS §11](docs/FORMATS.md)) now shows up as **Chao World: …**
-  entries under Maps and exports to FBX like any other stage. The Hero/Dark
-  gardens use a different, not-yet-decoded format.
+* **Renders Chao World, textured** — every Chao area (Lobby, Hero/Dark/Neutral
+  gardens, Entrance, Kindergarten, Karate, Stadium, the race courses) shows up as
+  a **Chao World: …** entry under Maps, renders with its real textures, and
+  exports to FBX. Chao files turned out to be **GameCube REL modules**, so they
+  are relocated before reading — that is what fills in their vertex pointers; see
+  [FORMATS §11](docs/FORMATS.md). Textures come from the matching `al_*_tex.prs`
+  archives, bound through each module's own texture list. The Lobby is assembled
+  from its three modules (room, `.rel`, and the garden-gate variant).
 * **Friendly, organised browser** — assets are grouped into **Maps / Characters
   / Objects / Particles** tabs with names read straight from the game
   (`City Escape`, `Cannon's Core (Sonic)`, `Metal Sonic`, `Boss: Biolizard`),

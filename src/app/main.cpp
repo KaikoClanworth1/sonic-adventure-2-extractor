@@ -691,7 +691,10 @@ int run_app() {
                 // a single-model file needs no selector; multi-model files
                 // default to the first so parts do not stack at the origin
                 if (model_sel >= (int)current.models.size()) model_sel = -1;
-                if (model_sel < 0 && current.models.size() > 1) model_sel = 0;
+                // A Chao area's models are modules of one place (the Lobby is the
+                // room + its .rel + the gate variant), so show them together.
+                bool chao = e.kind == AssetKind::ChaoStage;
+                if (model_sel < 0 && current.models.size() > 1 && !chao) model_sel = 0;
                 scene_from_asset(current, scene, e.rel_path, model_sel);
                 cam = Camera();
                 // build the object-placement overlay and show it by default when a

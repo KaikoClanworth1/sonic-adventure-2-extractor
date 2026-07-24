@@ -480,6 +480,56 @@ static std::string sibling(const std::string& path, const std::string& from,
     return fs::exists(p, ec) ? p : std::string();
 }
 
+// Chao areas keep their textures in per-area GVM archives named al_*_tex.prs
+// (ChaoStgHero -> al_stg_hero_tex.prs + al_hero_obj_tex.prs, and so on). The
+// module's own texture list gives the names in index order, so pool the
+// candidate archives and emit one image per list entry; that makes a part's
+// texture_id -- which indexes the list -- resolve to the right image.
+static void load_chao_textures(const AssetEntry& e, const GameIndex& idx,
+                               const std::vector<std::string>& texnames,
+                               std::vector<Image>& out) {
+    std::string nl = lower(e.name);
+    std::string area;                       // "chaostghero.prs" -> "hero"
+    if (nl.rfind("chaostg", 0) == 0) {
+        area = nl.substr(7);
+        size_t dot = area.find('.');
+        if (dot != std::string::npos) area = area.substr(0, dot);
+    }
+    std::vector<Image> pool;
+    for (const auto& ae : idx.entries()) {
+        std::string an = lower(ae.name);
+        if (an.rfind("al_", 0) != 0 || !ends_with(an, ".prs")) continue;
+        if (an.find("_tex") == std::string::npos && an.find("tex_") == std::string::npos)
+            continue;
+        bool want = (!area.empty() && an.find(area) != std::string::npos) ||
+                    an == "al_common_tex.prs" || an == "al_env_tex.prs" ||
+                    an == "al_tex_common.prs";
+        if (!want) continue;
+        std::vector<Image> imgs;
+        if (load_textures(ae.path, imgs))
+            for (auto& im : imgs) pool.push_back(std::move(im));
+    }
+    if (texnames.empty()) {                 // no list (Lobby strips): show them all
+        out = std::move(pool);
+        return;
+    }
+    for (const auto& want : texnames) {
+        std::string w = lower(want);
+        const Image* hit = nullptr;
+        for (const auto& im : pool)
+            if (lower(im.name) == w) { hit = &im; break; }
+        if (hit) {
+            out.push_back(*hit);
+        } else {                            // keep list indices aligned
+            Image ph;
+            ph.name = want;
+            ph.width = ph.height = 1;
+            ph.rgba = {255, 255, 255, 255};
+            out.push_back(std::move(ph));
+        }
+    }
+}
+
 bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
                 std::string* error) {
     out.models.clear();
@@ -513,13 +563,40 @@ bool load_asset(const AssetEntry& e, const GameIndex& idx, LoadedAsset& out,
     auto data = load_file(e.path);
     if (data.empty()) return fail("could not read file");
 
-    // Chao World stage: packed triangle-strip geometry, world space.
+    // Chao World stage. These are GameCube REL modules, so relocate first: that
+    // is what fills in the vertex-set data pointers (NULL on disk). Most areas
+    // are then ordinary GC "Ginja" with UVs and a texture list; the Lobby uses
+    // the packed triangle-strip format instead.
     if (e.kind == AssetKind::ChaoStage) {
-        Model m;
-        if (!load_chao_stage(data, m))
-            return fail("no Chao geometry (garden format not yet supported)");
-        m.name = e.name;
-        out.models.push_back(std::move(m));
+        std::vector<std::string> texnames;
+        auto add_chao = [&](const std::vector<uint8_t>& raw, const std::string& nm) {
+            std::vector<uint8_t> img;
+            if (!rel_relocate(raw.data(), raw.size(), img)) img = raw;
+            Model m;
+            std::vector<std::string> tn;
+            if (!load_chao_stage_gc(img, m, tn) && !load_chao_stage(img, m)) return false;
+            if (texnames.empty()) texnames = std::move(tn);
+            m.name = nm;
+            out.models.push_back(std::move(m));
+            return true;
+        };
+        if (!add_chao(data, e.name)) return fail("no Chao geometry decoded");
+
+        // The Chao Lobby is split across modules: the room itself is in
+        // ChaoStgLobby.prs, more of it in ChaoStgLobby.rel, and the garden gates
+        // live in the ChaoStgLobbyHDK variant (the one with all three gates
+        // present). Pull them in so "Lobby" is the whole lobby.
+        if (lower(e.name) == "chaostglobby.prs") {
+            for (const char* companion : {"chaostglobby.rel", "chaostglobbyhdk.prs"}) {
+                for (const auto& ae : idx.entries()) {
+                    if (lower(ae.name) != companion) continue;
+                    auto cd = load_file(ae.path);
+                    if (!cd.empty()) add_chao(cd, ae.name);
+                    break;
+                }
+            }
+        }
+        load_chao_textures(e, idx, texnames, out.textures);
         return true;
     }
 
